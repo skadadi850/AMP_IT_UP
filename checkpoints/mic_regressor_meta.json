@@ -1,0 +1,34 @@
+{
+  "species_levels": [
+    "escherichia coli",
+    "staphylococcus aureus",
+    "pseudomonas aeruginosa",
+    "candida albicans",
+    "bacillus subtilis",
+    "staphylococcus epidermidis",
+    "klebsiella pneumoniae",
+    "enterococcus faecalis",
+    "salmonella typhimurium",
+    "micrococcus luteus",
+    "bacillus cereus",
+    "acinetobacter baumannii",
+    "salmonella enterica",
+    "enterobacter cloacae",
+    "listeria monocytogenes"
+  ],
+  "descriptors": [
+    "length",
+    "length_norm",
+    "net_charge",
+    "charge_per_res",
+    "mu_h",
+    "gravy_raw",
+    "gravy",
+    "cys_count",
+    "cys_class_idx"
+  ],
+  "uses_embeddings": true,
+  "embedding_dim": 480,
+  "holdout_spearman": 0.6182793237849927,
+  "holdout_mae": 0.4426739811897278
+}
