@@ -255,6 +255,57 @@ Re-run `verify_submission.py` on the final top 100.
 
 ---
 
+## Phase 7. Kaggle submission
+
+The README's step 6 says "To submit, head to the Kaggle competition page:
+https://www.kaggle.com/competitions/amp-challenge". This is a second delivery
+channel the earlier phases did not account for: making the repository correct
+is necessary but is not, by itself, submitting.
+
+### Hard date
+
+**October 1st 2026 AOE** is the submission deadline for both the
+50,000-peptide library and the top-100 list (competition document, section
+2.4 Timeline). Phase 1 computational evaluation runs through October 2026,
+with qualification decisions communicated afterwards.
+
+### What is established
+
+- Registration requires an **institutional email address**; free webmail is
+  rejected for primary registration. `skadadi@purdue.edu` qualifies.
+- One team submits **one** library and **one** top-100 list. Contributing to
+  more than one team requires a genuinely distinct method and must be declared
+  at registration.
+- The repository is a separate requirement from the Kaggle upload: public for
+  co-authorship eligibility, or private with read access granted to
+  `@RasmusML` and `@szymczakpau` for benchmark participation.
+- If the platform is down near the deadline, organizers open a Google Forms
+  backup endpoint with compliance checks applied manually.
+
+### What is not yet known
+
+Whether Kaggle wants the two FASTA files uploaded directly, a repository URL,
+or both, and whether it enforces its own file-naming or size limits. The
+Kaggle page and the competition website are both client-rendered, so neither
+could be read automatically; this has to be checked by hand, signed in.
+
+**Do this early, not at the end.** Registration may require approval of the
+institutional address, and the answer may constrain the output format — which
+is the one thing that is expensive to change after a generation run.
+
+### Checklist
+
+1. Register the team with the Purdue address; declare any multi-team
+   participation.
+2. Read the Kaggle submission form and record here exactly what it accepts.
+3. Confirm whether the repository URL is supplied through Kaggle or by email.
+4. Submit `generate/library.fasta` and `generate/top.fasta` as that form
+   requires, before October 1st AOE.
+5. Grant `@RasmusML` and `@szymczakpau` read access, and make the repository
+   public if pursuing co-authorship.
+
+---
+
 ## Final gate
 
 On a clean clone, on a machine that is not the dev box:

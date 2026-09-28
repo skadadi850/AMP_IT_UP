@@ -84,7 +84,17 @@ GENERATOR_CKPT = CHECKPOINTS / "masked_diffusion_best.pt"
 SPECIES_VOCAB = CHECKPOINTS / "species_vocab.json"
 REGRESSOR = CHECKPOINTS / "mic_regressor.json"
 REGRESSOR_META = CHECKPOINTS / "mic_regressor_meta.json"
-LENGTH_CALIBRATION = CHECKPOINTS / "length_calibration.json"
+#: Length calibration, most specific first. The stage-5b file is fitted
+#: against the checkpoint we actually ship; `length_calibration.json` was
+#: fitted against the face_only weights and is a fallback, not an equivalent.
+#: Length distribution is scored directly in Phase 1, so using a pad bias
+#: derived from different weights would skew all 50,000 sequences on a scored
+#: axis. `scripts/hpc/60_calibrate_and_generate.sbatch` writes the stage-5b
+#: file, and generation in that job picks it up here.
+LENGTH_CALIBRATIONS = (
+    CHECKPOINTS / "length_calibration_stage5b.json",
+    CHECKPOINTS / "length_calibration.json",
+)
 
 #: Sampler settings. `guidance_weight`, `steps`, `temperature` and
 #: `batch_size` mirror the defaults in `scripts/generate_masked.py`, so the
@@ -181,8 +191,25 @@ def load_models(device: str):
     _, references = read_fasta(REFERENCE_FASTA)
     novelty = ExhaustiveNovelty(references, threshold=SAFETY_CEILING)
 
-    calibration = json.loads(LENGTH_CALIBRATION.read_text())
+    calibration = _load_calibration()
     return model, species_vocab, oracle, novelty, references, calibration
+
+
+def _load_calibration() -> dict:
+    """Load the most specific length calibration available."""
+    for path in LENGTH_CALIBRATIONS:
+        if path.exists():
+            calibration = json.loads(path.read_text())
+            print(
+                f"length  : pad_bias {calibration.get('best_pad_bias', 0.0):+.2f}, "
+                f"reveal {calibration.get('reveal', 'uniform')} "
+                f"(from {path.name})"
+            )
+            return calibration
+    raise SystemExit(
+        "no length calibration found; expected one of: "
+        + ", ".join(str(p) for p in LENGTH_CALIBRATIONS)
+    )
 
 
 def _structural_cluster(sequence: str) -> int:
