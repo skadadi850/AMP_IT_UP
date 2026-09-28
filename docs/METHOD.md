@@ -7,8 +7,34 @@
 
 ## Abstract
 
-_(150-250 words. What the model is, what it is conditioned on, how the top-100
-was selected.)_
+We design antimicrobial peptides with a masked discrete diffusion model
+operating directly on amino-acid tokens over a fixed 50-position canvas, with
+no latent bottleneck and no autoregressive decoder, so there is no
+reconstruction error between what the model scores and what it emits.
+Generation is steered by continuous physicochemical conditioning — length,
+charge per residue, hydrophobic moment, hydrophobicity, cysteine content —
+alongside assay-derived MIC, HC50 and Gram-selectivity axes and a categorical
+species axis, injected through adaLN-Zero modulation. Axes are dropped
+independently per sample during training and each carries an explicit
+observation mask, so a partially specified request is a state the model was
+trained on rather than a point off the manifold. This matters because potency
+labels are sparse while sequence-derived properties are dense. Sampling
+sweeps a length grid matched to the reference length distribution, with the
+PAD-logit bias calibrated against the shipped checkpoint.
+
+The 50,000-member library is filtered for the competition's structural
+constraints, deduplicated, and screened exhaustively so no member exceeds 80%
+Levenshtein identity to any of the 39,448 reference antibacterials.
+
+The top 100 are ranked by predicted breadth across the competition's
+20-strain panel rather than potency against one organism. An XGBoost MIC
+regressor over ESM-2 embeddings and physicochemical descriptors scores each
+candidate against every panel species, weighted by strain count; candidates
+are ordered by the fraction of the panel predicted at or below 16 µM, with
+mean predicted MIC as the tie-break, under a hard floor requiring activity
+against at least one Gram-negative and one Gram-positive strain. The
+regressor is validated on a cluster-disjoint 40%-identity split (Spearman
+0.533) and used as a breadth estimator, not a fine-grained ranking.
 
 ## Training data
 

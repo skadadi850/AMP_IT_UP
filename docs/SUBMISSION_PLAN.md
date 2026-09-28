@@ -282,16 +282,58 @@ with qualification decisions communicated afterwards.
 - If the platform is down near the deadline, organizers open a Google Forms
   backup endpoint with compliance checks applied manually.
 
-### What is not yet known
+### The Kaggle deadline is the same deadline
 
-Whether Kaggle wants the two FASTA files uploaded directly, a repository URL,
-or both, and whether it enforces its own file-naming or size limits. The
-Kaggle page and the competition website are both client-rendered, so neither
-could be read automatically; this has to be checked by hand, signed in.
+Checked directly against the competition website's source (the site is
+client-rendered, so its published HTML cannot be read, but
+`szczurek-lab/amp-challenge-website` is public). `TimelineSection.tsx` and
+`SubmitCTA.tsx` both give one date and no other:
 
-**Do this early, not at the end.** Registration may require approval of the
-institutional address, and the answer may constrain the output format — which
-is the one thing that is expensive to change after a generation run.
+    October 1, 2026 AOE -- Submission deadline
+
+There is **no separate Kaggle deadline**. The submit link is
+`https://www.kaggle.com/competitions/amp-challenge/overview`.
+
+### What Kaggle accepts is still unknown
+
+Neither the website source, the template repository, nor the competition
+document states what the Kaggle form takes -- the two FASTA files, a
+repository URL, or both. No file-format string (`fasta`, `csv`, `upload`)
+appears anywhere in the website source. The Kaggle page itself requires a
+signed-in session to render, so this has to be checked by hand.
+
+What the submission must contain is documented, and is broader than the two
+generated files:
+
+1. an abstract summarising the method;
+2. the 50,000-sequence library;
+3. the ranked top-100 with documentation of the selection and ranking
+   procedure;
+4. a short summary of training data, external databases, and any manual
+   intervention or computational filters applied;
+5. the repository -- private with read access for `@RasmusML` and
+   `@szymczakpau` for benchmark participation, public and template-shaped for
+   co-authorship.
+
+Items 1, 3 and 4 live in `docs/METHOD.md`. Whether Kaggle wants them pasted
+into a form, attached, or linked is part of what needs checking.
+
+### One unresolved compliance detail
+
+The website's compliance-check description lists "sequence validity, amino
+acid alphabet, length limits, duplicate detection, and **metadata
+completeness**". The first four are exactly what `verify_submission.py`
+checks. What "metadata completeness" covers is not defined anywhere public.
+The template ships FASTA with bare `>seqN` headers and its own validator reads
+nothing else, so this most likely refers to the submission-level material
+above rather than per-sequence columns -- but it is the one requirement we
+cannot confirm we meet, and it is worth asking on the competition repository's
+GitHub Issues, which is the stated channel for technical questions.
+
+Also worth noting for Phase 5: a top-100 candidate that exceeds the 80%
+identity ceiling is "treated as invalid and replaced by the next valid
+candidate", so the ordering below rank 100 is used too. The ranked list should
+be a genuinely ordered list, not an unordered set of 100.
 
 ### Checklist
 
