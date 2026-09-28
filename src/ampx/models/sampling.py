@@ -13,6 +13,7 @@ from typing import Dict, Iterable, List, Optional
 import numpy as np
 import pandas as pd
 import torch
+from tqdm import tqdm
 
 from .conditioning import CATEGORICAL_AXES, CONTINUOUS_AXES
 from .features import (
@@ -246,7 +247,61 @@ def candidate_frame(sequences: Iterable[str]) -> pd.DataFrame:
     return frame
 
 
+
+def sample_library(
+    model,
+    condition,
+    guidance_weight: float,
+    steps: int,
+    temperature: float,
+    batch_size: int,
+    seed: int | None,
+    free_length: bool = False,
+    reveal: str = "uniform",
+    pad_bias: float = 0.0,
+) -> list:
+    """Batched sampling from a masked-diffusion checkpoint.
+
+    Lives here rather than in `scripts/generate_masked.py` because the
+    competition entry point needs it: `uv` installs only `src/ampx`, so
+    anything under `scripts/` is absent from an installed environment and
+    importing it from `ampx.generate` would work on the dev box and fail on a
+    clean clone. The script imports it back from here, so there is one
+    implementation.
+
+    `seed` seeds a dedicated `torch.Generator` on the sampling device rather
+    than the global RNG, so sampling is reproducible independently of whatever
+    else has drawn from the global stream.
+    """
+    device = next(model.parameters()).device
+    total = condition["species_idx"].shape[0]
+
+    generator = None
+    if seed is not None:
+        generator = torch.Generator(device=device)
+        generator.manual_seed(int(seed))
+
+    sequences = []
+    for start in tqdm(range(0, total, batch_size), desc="sampling"):
+        stop = min(start + batch_size, total)
+        chunk = {key: value[start:stop].to(device) for key, value in condition.items()}
+        sequences.extend(
+            model.sample(
+                batch_size=stop - start,
+                condition=chunk,
+                guidance_weight=guidance_weight,
+                num_steps=steps,
+                temperature=temperature,
+                generator=generator,
+                free_length=free_length,
+                reveal=reveal,
+                pad_bias=pad_bias,
+            )
+        )
+    return sequences
+
 __all__ = [
+    "sample_library",
     "REQUEST_KEYS",
     "build_condition",
     "candidate_frame",

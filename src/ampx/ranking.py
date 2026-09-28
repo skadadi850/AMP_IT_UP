@@ -78,6 +78,7 @@ def select_top(
     kappa: float = 1.5,
     max_per_cluster: int = 4,
     identity_ceiling: float = SAFETY_CEILING,
+    novelty=None,
 ) -> list[Candidate]:
     """Choose `k` candidates maximising the risk-adjusted floor of the list.
 
@@ -92,6 +93,14 @@ def select_top(
     Lazy novelty checking matters in practice: verifying all 50,000 library
     members against ~39k references is billions of alignments, while verifying
     only the few hundred candidates you actually consider is seconds.
+
+    Pass `novelty` (an `ampx.models.novelty_fast.ExhaustiveNovelty`) in
+    preference to `references`. Both compute the same quantity -- the maximum
+    Levenshtein ratio against every reference -- but the index does it in
+    batched native code behind a lossless length prefilter, while the
+    `references` path is a Python loop retained for callers that have only a
+    list. Neither is a shortlist: one sequence over the ceiling invalidates
+    the submission, so this gate must see every reference.
     """
     ordered = sorted(candidates, key=lambda c: c.lcb(kappa), reverse=True)
 
@@ -103,7 +112,10 @@ def select_top(
             break
         if cand.cluster >= 0 and per_cluster.get(cand.cluster, 0) >= max_per_cluster:
             continue
-        if references is not None:
+        if novelty is not None:
+            if float(novelty.max_identity([cand.sequence])[0]) > identity_ceiling:
+                continue
+        elif references is not None:
             if max_identity(cand.sequence, references, identity_ceiling) > identity_ceiling:
                 continue
         chosen.append(cand)

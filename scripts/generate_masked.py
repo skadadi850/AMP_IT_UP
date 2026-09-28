@@ -42,7 +42,9 @@ from ampx.models.features import (
 )
 from ampx.models.masked_diffusion import MaskedDiffusionModel
 from ampx.models.sampling import build_condition, candidate_frame, length_grid
-from ampx.models.sampling import build_condition, candidate_frame, empirical_length_counts, length_grid
+from ampx.models.sampling import (build_condition, candidate_frame,
+                                  empirical_length_counts, length_grid,
+                                  sample_library)
 
 # Requested axis -> realized column, and the transform needed to compare.
 FIDELITY_AXES = {
@@ -63,46 +65,6 @@ def build_length_counts(total: int, min_length: int, max_length: int) -> dict:
 
 
 @torch.no_grad()
-def sample_library(
-    model,
-    condition,
-    guidance_weight: float,
-    steps: int,
-    temperature: float,
-    batch_size: int,
-    seed: int | None,
-    free_length: bool = False,
-    reveal: str = "uniform",
-    pad_bias: float = 0.0,
-) -> list:
-    device = next(model.parameters()).device
-    total = condition["species_idx"].shape[0]
-
-    generator = None
-    if seed is not None:
-        generator = torch.Generator(device=device)
-        generator.manual_seed(int(seed))
-
-    sequences = []
-    for start in tqdm(range(0, total, batch_size), desc="sampling"):
-        stop = min(start + batch_size, total)
-        chunk = {key: value[start:stop].to(device) for key, value in condition.items()}
-        sequences.extend(
-            model.sample(
-                batch_size=stop - start,
-                condition=chunk,
-                guidance_weight=guidance_weight,
-                num_steps=steps,
-                temperature=temperature,
-                generator=generator,
-                free_length=free_length,
-                reveal=reveal,
-                pad_bias=pad_bias,
-            )
-        )
-    return sequences
-
-
 def axis_error(frame: pd.DataFrame, condition, axis: str) -> float:
     if float(condition[f"{axis}_mask"][0]) == 0.0:
         return float("nan")

@@ -18,26 +18,36 @@ byte-comparing the outputs. Sources of nondeterminism that will fail you:
   * non-deterministic GPU kernels. Call `torch.use_deterministic_algorithms(True)`
     and set `CUBLAS_WORKSPACE_CONFIG=:4096:8` before any CUDA work;
   * multi-worker generation where results are collected in completion order
-    rather than sorted back into a canonical order.
+    rather than sorted back into a canonical order;
+  * **model construction drawing from the global RNG**. Loading a checkpoint
+    can initialise layers absent from the weights, consuming RNG draws and
+    shifting everything sampled afterwards. `main()` therefore loads every
+    model *before* seeding, never after.
 
 The safest architecture, and the one used here: generate to a list, sort
 deterministically, then write. Never let concurrency touch output ordering.
 
-## Current state
+## Pipeline
 
-`_placeholder_generator` is an order-2 Markov model fit on the reference AMP
-set. It exists so the repository passes the official validator from day one --
-swap in your trained model at the marked call site. It is not a competitive
-method and should not be submitted.
+1. `load_models` builds the masked-diffusion generator, the MIC oracle and the
+   exhaustive novelty index. No RNG is touched here.
+2. `set_global_determinism` pins every stream, once, afterwards.
+3. `generate_library` samples in rounds against a length grid, and after each
+   round drops sequences that are non-compliant, duplicated, an exact
+   reference match, or above the 80% identity ceiling. Rounds continue until
+   the library is full, each with its own derived seed so the result is a
+   function of the base seed alone.
+4. `score_candidates` scores survivors with the oracle.
+5. `select_top` picks the hundred, re-checking novelty exhaustively.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import random
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -46,144 +56,211 @@ from .compliance import (
     SAFETY_CEILING,
     LIBRARY_SIZE,
     TOP_SIZE,
-    is_valid_sequence,
     read_fasta,
     verify_library,
     verify_top,
     write_fasta,
 )
+from .models.compliance import compliance_report
+from .models.features import MAX_PEPTIDE_LENGTH, MIN_PEPTIDE_LENGTH
+from .models.masked_diffusion import MaskedDiffusionModel
+from .models.novelty_fast import ExhaustiveNovelty
+from .models.sampling import empirical_length_counts, length_grid, sample_library
+from .predictor import Oracle, resolve_device
 from .ranking import Candidate, select_top
 
-#: Every stochastic component must derive from this one value.
+#: Every stochastic component must derive from this one value. It is a
+#: module-level default rather than a required argument because the
+#: reproducibility requirement is that running the script *with no arguments*
+#: twice produces identical output.
 DEFAULT_SEED = 42
 
 _HERE = Path(__file__).resolve().parent
 _REPO_ROOT = _HERE.parent.parent
 REFERENCE_FASTA = _REPO_ROOT / "data" / "reference" / "antibacterial.fasta"
+CHECKPOINTS = _REPO_ROOT / "checkpoints"
+GENERATOR_CKPT = CHECKPOINTS / "masked_diffusion_best.pt"
+SPECIES_VOCAB = CHECKPOINTS / "species_vocab.json"
+REGRESSOR = CHECKPOINTS / "mic_regressor.json"
+REGRESSOR_META = CHECKPOINTS / "mic_regressor_meta.json"
+LENGTH_CALIBRATION = CHECKPOINTS / "length_calibration.json"
+
+#: Sampler settings. `guidance_weight`, `steps`, `temperature` and
+#: `batch_size` mirror the defaults in `scripts/generate_masked.py`, so the
+#: entry point and the research script sample the same way.
+GUIDANCE_WEIGHT = 2.0
+SAMPLING_STEPS = 128
+TEMPERATURE = 1.0
+BATCH_SIZE = 512
+
+#: Oversample factor per round. Compliance, dedup and the novelty ceiling all
+#: reject candidates, so a round must ask for more than it needs.
+OVERSAMPLE = 1.6
+MAX_ROUNDS = 12
+
+#: Species the oracle scores against when ranking. MIC is a
+#: (sequence, species) prediction, so a target must be named. Phase 5 decides
+#: whether to rank on one organism or aggregate across several; until then
+#: this is a single well-populated Gram-negative, which is also the species
+#: the regressor predicts best on the held-out split (Spearman 0.62).
+SCORE_SPECIES = "escherichia coli"
 
 
 def set_global_determinism(seed: int) -> None:
-    """Pin every RNG we might touch. Call this first, before anything else."""
+    """Pin every RNG we might touch.
+
+    Call this *after* all model loading, not before: `from_pretrained` and
+    checkpoint loads can initialise missing layers, and those draws would
+    otherwise advance the global stream between seeding and sampling.
+    """
     os.environ.setdefault("PYTHONHASHSEED", str(seed))
     os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     random.seed(seed)
     np.random.seed(seed)
-    try:  # torch is optional until you plug in a trained model
-        import torch
+    import torch
 
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-        torch.use_deterministic_algorithms(True, warn_only=True)
-        torch.backends.cudnn.benchmark = False
-    except ImportError:
-        pass
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
-# --------------------------------------------------------------------------- #
-# Placeholder generator -- REPLACE THIS
-# --------------------------------------------------------------------------- #
+def load_models(device: str):
+    """Build the generator, the oracle and the novelty index.
 
-def _fit_markov(sequences: list[str], order: int = 2) -> dict:
-    """Fit an order-k Markov model over residues, plus a length distribution."""
-    counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    lengths: list[int] = []
+    Deliberately free of RNG use, so `set_global_determinism` can run after it.
+    """
+    species_vocab = json.loads(SPECIES_VOCAB.read_text())
+    model = MaskedDiffusionModel.load(str(GENERATOR_CKPT), device=device)
+    model.eval()
 
-    for seq in sequences:
-        lengths.append(len(seq))
-        padded = "^" * order + seq
-        for i in range(order, len(padded)):
-            counts[padded[i - order : i]][padded[i]] += 1
-
-    model = {}
-    for ctx, nxt in counts.items():
-        residues = sorted(nxt)  # sorted -> deterministic ordering
-        weights = np.array([nxt[r] for r in residues], dtype=float)
-        model[ctx] = (residues, weights / weights.sum())
-
-    return {"order": order, "table": model, "lengths": sorted(lengths)}
-
-
-def _placeholder_generator(
-    n: int, model: dict, rng: np.random.Generator, forbidden: set[str]
-) -> list[str]:
-    """Sample `n` unique valid sequences from the fitted Markov model."""
-    order = model["order"]
-    table = model["table"]
-    lengths = model["lengths"]
-
-    out: list[str] = []
-    seen: set[str] = set()
-    attempts = 0
-    max_attempts = n * 200
-
-    while len(out) < n and attempts < max_attempts:
-        attempts += 1
-        target = int(rng.choice(lengths))
-        seq = ""
-        ctx = "^" * order
-        for _ in range(target):
-            entry = table.get(ctx)
-            if entry is None:
-                break
-            residues, probs = entry
-            seq += str(rng.choice(residues, p=probs))
-            ctx = (ctx + seq[-1])[-order:]
-
-        if not is_valid_sequence(seq) or seq in seen or seq in forbidden:
-            continue
-        seen.add(seq)
-        out.append(seq)
-
-    if len(out) < n:
-        raise RuntimeError(
-            f"generated only {len(out)}/{n} unique sequences after "
-            f"{attempts} attempts"
-        )
-    return out
-
-
-# --------------------------------------------------------------------------- #
-# Pipeline
-# --------------------------------------------------------------------------- #
-
-def generate_library(n_sequences: int, seed: int) -> list[str]:
-    """Produce the compliant library. Swap the marked call for your model."""
-    rng = np.random.default_rng(seed)
+    oracle = Oracle(str(REGRESSOR), str(REGRESSOR_META), device=device)
 
     _, references = read_fasta(REFERENCE_FASTA)
-    forbidden = set(references)
+    novelty = ExhaustiveNovelty(references, threshold=SAFETY_CEILING)
 
-    # >>> REPLACE: load your checkpoint and sample from it here. <<<
-    model = _fit_markov(references, order=2)
-    sequences = _placeholder_generator(n_sequences, model, rng, forbidden)
+    calibration = json.loads(LENGTH_CALIBRATION.read_text())
+    return model, species_vocab, oracle, novelty, references, calibration
+
+
+def _structural_cluster(sequence: str) -> int:
+    """Coarse deterministic bucket used to cap correlated failure in the top 100.
+
+    Length band crossed with net-charge band. This is a placeholder for the
+    real diversity constraint, which is Phase 5's deliverable; it exists so
+    `select_top`'s `max_per_cluster` does something meaningful rather than
+    partitioning on an arbitrary index.
+    """
+    charge = sum(c in "KR" for c in sequence) - sum(c in "DE" for c in sequence)
+    length_band = min((len(sequence) - MIN_PEPTIDE_LENGTH) // 6, 6)
+    charge_band = int(np.clip(charge, -2, 12)) // 3
+    return int(length_band * 8 + charge_band)
+
+
+def generate_library(
+    n_sequences: int,
+    seed: int,
+    model,
+    species_vocab: dict,
+    novelty: ExhaustiveNovelty,
+    references: list[str],
+    calibration: dict,
+    device: str,
+    request: dict | None = None,
+) -> list[str]:
+    """Sample until `n_sequences` unique, compliant, novel sequences exist."""
+    request = dict(request or {})
+    reference_exact = set(references)
+    reference_lengths = [len(s) for s in references]
+
+    # The calibration ships `reveal`/`best_pad_bias` fitted by
+    # scripts/calibrate_length.py. pad_bias is only meaningful with
+    # free_length, which is the configuration it was fitted under.
+    reveal = calibration.get("reveal", "uniform")
+    pad_bias = float(calibration.get("best_pad_bias", 0.0))
+
+    accepted: list[str] = []
+    seen: set[str] = set()
+
+    for round_index in range(MAX_ROUNDS):
+        remaining = n_sequences - len(accepted)
+        if remaining <= 0:
+            break
+        ask = int(remaining * OVERSAMPLE) + 1
+
+        counts = empirical_length_counts(reference_lengths, ask)
+        condition = length_grid(request, counts, species_vocab, device=device)
+
+        raw = sample_library(
+            model,
+            condition,
+            guidance_weight=GUIDANCE_WEIGHT,
+            steps=SAMPLING_STEPS,
+            temperature=TEMPERATURE,
+            batch_size=BATCH_SIZE,
+            # Derived, not reused: identical seeds would make every round draw
+            # the same sequences and the loop would never converge.
+            seed=seed + round_index,
+            free_length=True,
+            reveal=reveal,
+            pad_bias=pad_bias,
+        )
+
+        # Cheap filters first, so the identity scan only sees survivors.
+        fresh: list[str] = []
+        for seq in raw:
+            if seq in seen or seq in reference_exact:
+                continue
+            if not all(compliance_report(seq).values()):
+                continue
+            seen.add(seq)
+            fresh.append(seq)
+
+        if fresh:
+            keep = novelty.is_novel(fresh)
+            accepted.extend(seq for seq, ok in zip(fresh, keep) if ok)
+
+        print(
+            f"round {round_index}: sampled {len(raw)}, "
+            f"{len(fresh)} new and compliant, library now {len(accepted)}"
+        )
+
+    if len(accepted) < n_sequences:
+        raise RuntimeError(
+            f"produced only {len(accepted)} of {n_sequences} sequences after "
+            f"{MAX_ROUNDS} rounds. Raise MAX_ROUNDS or OVERSAMPLE, or widen "
+            "the conditioning grid."
+        )
 
     # Canonical ordering makes byte-identical output independent of how the
     # sequences were produced. Do not remove.
-    return sorted(sequences)
+    return sorted(accepted[:n_sequences])
 
 
-def score_candidates(sequences: list[str]) -> list[Candidate]:
-    """Attach surrogate predictions to sequences.
+def score_candidates(
+    sequences: list[str], oracle: Oracle, species: str = SCORE_SPECIES
+) -> list[Candidate]:
+    """Attach oracle predictions to sequences.
 
-    Replace with your calibrated ensemble. Return `mean_score` (higher is
-    better), `score_std` (ensemble disagreement) and a `cluster` id so
-    `select_top` can enforce structural spread. See docs/METHOD.md.
+    The oracle predicts log10 MIC, where lower is more potent, while
+    `Candidate.mean_score` is higher-is-better, so the sign is flipped.
+
+    `score_std` is 0.0 because the oracle is a single regressor, not an
+    ensemble. That makes `Candidate.lcb` collapse to the mean and the `kappa`
+    risk-aversion knob inert; it stays wired so an ensemble can be dropped in
+    without touching the selection code.
     """
-    # Placeholder: net charge as a crude activity proxy, so the pipeline runs.
-    cationic = set("KR")
-    anionic = set("DE")
-    out = []
-    for i, seq in enumerate(sequences):
-        charge = sum(c in cationic for c in seq) - sum(c in anionic for c in seq)
-        out.append(
-            Candidate(
-                sequence=seq,
-                mean_score=charge / max(len(seq), 1),
-                score_std=0.0,
-                cluster=i % 25,
-            )
+    predicted = oracle.predict(sequences, [species] * len(sequences))
+    return [
+        Candidate(
+            sequence=seq,
+            mean_score=float(-value),
+            score_std=0.0,
+            cluster=_structural_cluster(seq),
         )
-    return out
+        for seq, value in zip(sequences, predicted)
+    ]
 
 
 def main() -> None:
@@ -193,37 +270,51 @@ def main() -> None:
     parser.add_argument("--n-sequences", type=int, default=LIBRARY_SIZE)
     parser.add_argument("--top-k", type=int, default=TOP_SIZE)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    parser.add_argument("--device", default=None,
+                        help="'cuda', 'cpu', or omitted to resolve automatically.")
+    parser.add_argument("--species", default=SCORE_SPECIES,
+                        help="Target organism the oracle ranks against.")
     parser.add_argument("--kappa", type=float, default=1.5,
-                        help="Risk aversion in top-K selection.")
+                        help="Risk aversion in top-K selection. Inert while the "
+                             "oracle is a single model (score_std is 0).")
     parser.add_argument("--max-per-cluster", type=int, default=4)
     parser.add_argument("--identity-ceiling", type=float, default=SAFETY_CEILING,
                         help="Max Levenshtein ratio to any reference sequence. "
                              "The validator fails above 0.80; default leaves margin.")
-    parser.add_argument("--skip-verify", action="store_true",
-                        help="Skip the similarity scan (faster; not for submission).")
+    parser.add_argument("--out", default=None,
+                        help="Output directory (default: named after the entry point).")
     args = parser.parse_args()
+
+    device = resolve_device(args.device)
+    print(f"device  : {device}")
+
+    # Load first, seed second. See set_global_determinism.
+    model, species_vocab, oracle, novelty, references, calibration = load_models(device)
+    print(f"oracle  : {oracle.n_trees} trees, esm={oracle.meta.get('esm_model')}")
 
     set_global_determinism(args.seed)
 
-    out_dir = Path(entry_point)
+    out_dir = Path(args.out) if args.out else Path(entry_point)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    library = generate_library(args.n_sequences, args.seed)
+    library = generate_library(
+        args.n_sequences, args.seed, model, species_vocab, novelty,
+        references, calibration, device,
+    )
     library_path = out_dir / "library.fasta"
     write_fasta(library, library_path)
     print(f"library : {len(library)} sequences -> {library_path}")
 
-    _, references = read_fasta(REFERENCE_FASTA)
     report = verify_library(library, reference=set(references),
                             expected_size=args.n_sequences)
     print(report)
     if not report.ok:
         sys.exit(1)
 
-    candidates = score_candidates(library)
+    candidates = score_candidates(library, oracle, species=args.species)
     top = select_top(
         candidates,
-        references=None if args.skip_verify else references,
+        novelty=novelty,
         k=args.top_k,
         kappa=args.kappa,
         max_per_cluster=args.max_per_cluster,
@@ -235,12 +326,8 @@ def main() -> None:
     write_fasta(top_sequences, top_path)
     print(f"top     : {len(top_sequences)} sequences -> {top_path}")
 
-    top_report = verify_top(
-        top_sequences,
-        library,
-        references=None if args.skip_verify else references,
-        top_k=args.top_k,
-    )
+    top_report = verify_top(top_sequences, library, references=references,
+                            top_k=args.top_k)
     print(top_report)
     if not top_report.ok:
         sys.exit(1)
