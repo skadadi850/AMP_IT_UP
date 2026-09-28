@@ -3,7 +3,7 @@
 #SBATCH -N 1
 #SBATCH -p ai
 #SBATCH -q normal
-#SBATCH -t 03:00:00
+#SBATCH -t 05:00:00
 #SBATCH --requeue
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-gpu=14
@@ -19,6 +19,7 @@
 #
 # Stages, in order:
 #   1. pad-bias calibration grid against the SHIPPED checkpoint
+#      (skipped with --skip-calibration; see the note on that flag below)
 #   2. STOP if --calibrate-only, so the grid can be reviewed before any
 #      library is generated
 #   3. full generation, twice, into separate directories
@@ -26,6 +27,12 @@
 #   5. the organizers' validator on the first run's output
 #
 # Any stage failing fails the job: `set -euo pipefail` plus explicit exits.
+#
+# Walltime is 5h, raised from 3h. Job 16736825 was cancelled at the 3h limit
+# with run B 126/157 batches in: sampling alone is ~1h28m per run, so two runs
+# plus calibration, environment sync, weight fetch and oracle scoring of
+# 50,000 sequences does not fit. Keep this close to real runtime -- the `ai`
+# queue is deep and padded requests backfill badly -- but 3h was under it.
 
 starts=$(date +"%s")
 start=$(date +"%r, %m-%d-%Y")
@@ -51,7 +58,18 @@ mkdir -p "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR"
 trap 'rm -rf "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR"' EXIT
 
 CALIBRATE_ONLY=0
-[[ "${1:-}" == "--calibrate-only" ]] && CALIBRATE_ONLY=1
+SKIP_CALIBRATION=0
+for arg in "$@"; do
+  case "$arg" in
+    --calibrate-only)    CALIBRATE_ONLY=1 ;;
+    --skip-calibration)  SKIP_CALIBRATION=1 ;;
+    *) echo "unknown argument: $arg" >&2; exit 2 ;;
+  esac
+done
+if [[ "$CALIBRATE_ONLY" -eq 1 && "$SKIP_CALIBRATION" -eq 1 ]]; then
+  echo "--calibrate-only and --skip-calibration are mutually exclusive" >&2
+  exit 2
+fi
 
 cd "$REPO"
 
@@ -84,7 +102,7 @@ RUN_B="$REPO/run_b"
 echo "[cfg] REPO=$REPO D=$D"
 echo "[cfg] CKPT=$CKPT"
 echo "[cfg] META=$META SPLITS=$SPLITS"
-echo "[cfg] CALIBRATE_ONLY=$CALIBRATE_ONLY GRID=0.0 +0.1 +0.2 +0.3 +0.4 +0.5 +0.75 +1.0"
+echo "[cfg] CALIBRATE_ONLY=$CALIBRATE_ONLY SKIP_CALIBRATION=$SKIP_CALIBRATION GRID=0.0 +0.1 +0.2 +0.3 +0.4 +0.5 +0.75 +1.0"
 echo "[cfg] RUN_A=$RUN_A RUN_B=$RUN_B"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 
@@ -99,6 +117,24 @@ uv sync
 uv run python scripts/fetch_weights.py
 
 echo
+if [[ "$SKIP_CALIBRATION" -eq 1 ]]; then
+# The fitted pad_bias no longer reaches generation: generate.py passes
+# free_length=False and pad_bias=0.0 at the sampling call site, so the value in
+# checkpoint/length_calibration_stage5b.json is printed for provenance and
+# nothing else. Re-running the grid costs wall clock that run B needs and would
+# rewrite that file, so the flag skips the stage rather than treating it as a
+# cheap no-op. The file must already exist; the check below is the guard.
+echo "== stage 1: SKIPPED (--skip-calibration) =="
+if [[ ! -f "$REPO/checkpoint/length_calibration_stage5b.json" ]]; then
+  echo "FAIL: --skip-calibration requires an existing" >&2
+  echo "      checkpoint/length_calibration_stage5b.json; run without the" >&2
+  echo "      flag to fit it." >&2
+  exit 1
+fi
+echo "  using existing checkpoint/length_calibration_stage5b.json:"
+uv run python -c "import json;d=json.load(open('checkpoint/length_calibration_stage5b.json'));print(f\"    pad_bias {d['best_pad_bias']:+.2f}, KS {d['ks_length_vs_train']:.4f}, reveal {d['reveal']}\")"
+echo "  (pad_bias is inert under free_length=False; recorded, not applied)"
+else
 echo "== stage 1: pad-bias calibration grid (stage-5b checkpoint) =="
 uv run python scripts/calibrate_length.py \
   --checkpoint "$CKPT" \
@@ -143,6 +179,7 @@ print("old face_only value was -0.20; agreement here is confirmation, "
       "disagreement means the carried-over value would have skewed length.")
 print("wrote checkpoint/length_calibration_stage5b.json")
 PY
+fi
 
 if [[ "$CALIBRATE_ONLY" -eq 1 ]]; then
   echo
