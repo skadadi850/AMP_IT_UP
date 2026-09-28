@@ -1,3 +1,8 @@
 __pycache__/
 *.py[cod]
 .venv/
+
+# Superseded regressor kept locally as evidence for the split correction
+# described in docs/METHOD.md. Not needed to run anything.
+checkpoints/mic_regressor_leaky_split.json
+checkpoints/mic_regressor_leaky_split_meta.json

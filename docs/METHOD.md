@@ -16,7 +16,11 @@ See [../data/README.md](../data/README.md) for the full provenance table.
 
 - **Generator corpus:** _(sources, record counts, filters)_
 - **Predictor corpus:** _(EV positives/negatives, synthetic negatives, counts)_
-- **Splits:** MMseqs2 clustering at 40% identity, cluster-disjoint.
+- **Splits:** MMseqs2 clustering at 40% identity, cluster-disjoint. This holds
+  for the shipped regressor, but was not true of the first attempt: an earlier
+  run's split silently degenerated and the model was retrained. See
+  [A leaking split, caught and corrected](#a-leaking-split-caught-and-corrected)
+  for what happened and both sets of numbers.
 
 ### Harmonized activity table
 
@@ -121,9 +125,23 @@ The drop from 0.618 to 0.533 is the correction, not a regression: roughly
 predictive skill. The corrected model clears the preregistered gate of 0.4,
 and its label-shuffled leakage control reads 0.0314, far below the 0.15 ceiling.
 
-The superseded model is kept at `checkpoints/mic_regressor_leaky_split.json`
-with its own metadata, so the comparison can be re-run rather than taken on
-trust. It is not loaded by anything.
+The superseded model is retained locally, with its own metadata, so the
+comparison above can be re-run rather than taken on trust. It is deliberately
+not committed — it is evidence for a claim made here in prose, not something
+needed to reproduce the submission, and nothing loads it. Available on request.
+
+**On the ceiling this is measured against.** We attempted to bound how much
+headroom 0.5331 leaves by measuring how well independent sources agree with
+each other on the same peptide, and could not: every MIC record in
+`activity_harmonized.csv` comes from a single upstream source (GRAMPA), so
+there are no cross-source pairs to correlate. The within-source repeats that
+do exist are not a substitute — their median spread is 0.0013 log₁₀ units,
+which means they are overwhelmingly the same measurement recorded against
+different strain labels rather than independent assays. A ceiling derived from
+them would be biased towards perfect agreement and would overstate the model's
+remaining headroom, so no ceiling is reported here. The held-out Spearman
+should be read as an uncalibrated number: it is not known how much of the
+residual is irreducible assay noise.
 
 ### Tree count at prediction time
 
