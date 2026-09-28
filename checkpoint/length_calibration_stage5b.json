@@ -1,0 +1,20 @@
+{
+  "best_pad_bias": 0.5,
+  "ks_length_vs_train": 0.06854252158391949,
+  "calibration_reference": "training folds only (fold != 0), selectivity corpus",
+  "calibration_seed": 7,
+  "reveal": "structured",
+  "checkpoint": "checkpoint/masked_diffusion_best.pt",
+  "fitted_against": "stage-5b selectivity fine-tune (the shipped checkpoint)",
+  "supersedes": "checkpoint/length_calibration.json, fitted on face_only/",
+  "grid": [
+    0.0,
+    0.1,
+    0.2,
+    0.3,
+    0.4,
+    0.5,
+    0.75,
+    1.0
+  ]
+}

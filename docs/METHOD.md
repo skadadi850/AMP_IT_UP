@@ -214,6 +214,117 @@ being a constant in the code.
 - Calibration method:
 - Held-out performance (clustered split): FPR, Prec@100, AUPRC
 
+## Conditioning, and what it does and does not demonstrate
+
+Generation is conditioned on a 4,374-cell grid crossing the nine panel
+species (weighted by strain count, reproducing the panel's 15:5
+Gram-negative:Gram-positive split), target MIC (2, 4, 8 µM), target HC50
+(128, 256 µM), Gram selectivity (−0.5, 0.0, +0.5 log₁₀ ratio), and
+normalized charge per residue, hydrophobic moment and GRAVY swept across the
+ranges the training corpus covers. Length is drawn separately to match the
+reference length distribution and enforced as a hard constraint.
+
+### A caught-and-fixed defect: the first library was sampled unconditionally
+
+An earlier full generation run passed an empty conditioning request. Every
+axis fell through to its unknown index or a zero observation mask, leaving
+length as the only axis carrying signal, so a selectivity-conditioned model
+was sampled as though it were unconditional.
+
+On the `is_amp` axis this was worse than neutral. That axis is exempt from
+conditional dropout, which means its index-0 "unknown" embedding row never
+receives a gradient anywhere in training — the run was feeding the model an
+untrained, randomly initialised vector on the one axis it always saw. Index 1
+is genuinely trained: the pretraining corpus holds 269,824 general peptides
+against 39,448 AMPs, so a real general-versus-AMP contrast exists, and the
+fine-tuning corpus is entirely index 2. The shipped run sets `is_amp` to the
+validated-AMP value.
+
+The same run also lost the whole upper length band. It sampled with a free
+length and a positive PAD-logit bias, which lets the model end sequences
+early and overrides the requested length: 12.0% of requests were for peptides
+longer than 29 residues and none were produced, against a reference set that
+runs to 50. Length is now a hard constraint, verified to reproduce requested
+lengths of 10, 25 and 45 exactly.
+
+### HC50 conditioning steers toward predicted labels, not measurements
+
+The `log_hc50` axis is observed on every training row, but 53,806 of those
+60,405 values (89%) are **predicted** rather than measured; only 6,599 carry
+an assay measurement. Conditioning toward non-hemolytic therefore steers
+toward a hemolysis predictor's output. We use it because the Optimal
+Selectivity category is scored on HC50 and no other axis reaches it, but the
+resulting library should be understood as enriched for peptides a predictor
+considers non-hemolytic, which is a weaker claim than low measured
+hemolysis.
+
+### Predicted potency after conditioning is not independent evidence
+
+The MIC oracle used for ranking was trained on the same harmonised activity
+data that supplies the `log_mic`, `species` and `gram_selectivity`
+conditioning axes. Conditioning the generator toward potent MIC values and
+then observing that the oracle predicts potency is close to circular: we
+asked for it, and the two models share a corpus.
+
+We therefore report the panel success rate before and after conditioning as a
+diagnostic of whether the conditioning had any effect, not as evidence of
+potency. The unconditioned run gave 27,753 of 50,000 candidates (55.5%)
+clearing the Gram-class eligibility floor, with mean success rates of 0.455
+overall, 0.442 Gram-negative and 0.494 Gram-positive. Any improvement over
+those numbers shows the conditioning is doing something; it does not show the
+peptides are more active. Only the Phase 2 assays can show that.
+
+### The oracle is not extrapolating, and the ranking key reflects that
+
+Conditioning the generator toward potent MIC values raises an obvious worry:
+that the library has been pushed somewhere the MIC regressor has no training
+support, making its predictions confident and meaningless. We checked before
+committing to the library, scoring the generated peptides and a 2,000-sequence
+sample of the organizers' reference AMPs through the same oracle, and
+comparing both against measured MICs for the panel species.
+
+| distribution | p5 | median | p95 | below 16 µM |
+|---|---:|---:|---:|---:|
+| generated library (predicted) | 0.569 | 1.334 | 1.955 | 40.3% |
+| reference AMPs (predicted) | 0.615 | 1.305 | 1.927 | 39.8% |
+| panel species (**measured**) | −0.141 | 1.052 | 2.204 | 58.6% |
+
+log₁₀ µM; the 16 µM threshold is 1.204.
+
+The library's predicted distribution is indistinguishable from the one the
+same oracle assigns to known antimicrobial peptides — marginally *less*
+potent, not more. Training proximity supports the comparison rather than
+undermining it: the library's nearest oracle-training neighbour has median
+identity 0.567, against 0.609 for the reference AMPs, so the two sets sit at
+comparable distance from the regressor's training data. There is no sign of
+extrapolation.
+
+Both predicted distributions are, however, shifted toward weaker potency than
+the measured one and span a narrower range. That is the regression-to-the-mean
+of a model with a held-out Spearman of 0.533: it compresses predictions toward
+the centre. It is a property of the oracle, not of the library, and it applies
+equally to real AMPs.
+
+One consequence shapes the ranking. Predicted success rate against the panel
+is not saturated across the library — only about 40% of candidates fall below
+16 µM on the strain-weighted mean — but it does saturate among the top-ranked
+candidates, which are the only ones competing for 100 places out of 50,000. A
+key that is constant across every contender cannot order them, so the primary
+ranking key is the strain-weighted mean predicted log₁₀ MIC, which retains its
+variance. Success rate is still computed and reported as a diagnostic, and the
+fraction of candidates pinned at 1.00 is printed at generation time so the
+collapse stays visible.
+
+### Cysteine content is a compliance exclusion
+
+The grid requests zero-cysteine peptides only. The training corpus contains a
+two-cysteine class amounting to roughly 22% of rows, and it is excluded
+deliberately: two free cysteines on a linear peptide oxidise to an
+intramolecular disulfide under standard synthesis and handling, which is a
+cyclic molecule, and the competition requires linear peptides with free
+termini. This is a compliance decision rather than a modelling one — the
+excluded share is redistributed across the remaining grid.
+
 ## Filters applied to the library
 
 1. Alphabet restricted to the 20 standard residues; length 8-50.
@@ -305,6 +416,13 @@ partly about separating model quality from human curation.)_
 ## Reproducibility
 
 Fixed seed 42. `uv sync && uv run generate` produces byte-identical output.
+
+The sampling batch size is part of this contract, not a performance knob.
+Sampling draws from one seeded generator across the whole batch, so changing
+the batch size changes how that stream is consumed and produces a different
+library from the same seed. `BATCH_SIZE` in `ampx/generate.py` is fixed for
+this reason; retuning it for a different GPU's memory would silently change
+the submitted library.
 
 Model weights are **not** stored in git. `checkpoint/masked_diffusion_best.pt`
 and `checkpoint/mic_regressor.json` ship as GitHub Release assets;

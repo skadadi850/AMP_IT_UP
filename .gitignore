@@ -15,3 +15,9 @@ checkpoint/mic_regressor_leaky_split_meta.json
 # committed, and generate.py calls it before loading anything.
 checkpoint/masked_diffusion_best.pt
 checkpoint/mic_regressor.json
+
+# Working notes and run artifacts, not part of the submission.
+handoff.md
+logs/
+run_a/
+run_b/

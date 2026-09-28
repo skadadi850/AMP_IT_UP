@@ -62,12 +62,14 @@ from .compliance import (
     write_fasta,
 )
 from .models.compliance import compliance_report
-from .models.features import MAX_PEPTIDE_LENGTH, MIN_PEPTIDE_LENGTH
+from .models.features import LENGTH_SPAN, MAX_PEPTIDE_LENGTH, MIN_PEPTIDE_LENGTH
 from .models.masked_diffusion import MaskedDiffusionModel
 from .models.novelty_fast import ExhaustiveNovelty
-from .models.sampling import empirical_length_counts, length_grid, sample_library
+from .models.sampling import (build_condition, empirical_length_counts,
+                             sample_library)
 from .predictor import Oracle, resolve_device
-from .ranking import Candidate, select_top
+from .ranking import (INTERNAL_IDENTITY_LADDER, Candidate,
+                      select_top_diverse)
 from .weights import ensure_weights
 
 #: Every stochastic component must derive from this one value. It is a
@@ -156,6 +158,62 @@ PANEL_GRAM_NEGATIVE = frozenset({
 POTENCY_THRESHOLD_UM = 16.0
 LOG_POTENCY_THRESHOLD = float(np.log10(POTENCY_THRESHOLD_UM))
 
+# --------------------------------------------------------------------------- #
+# Conditioning grid
+#
+# The first full run sampled with an empty request, which left every axis at
+# index 0 or mask 0 and made the run very nearly unconditional -- length was
+# the only axis carrying signal. On `is_amp` that was worse than neutral: the
+# axis is exempt from conditional dropout, so its index-0 row never receives a
+# gradient anywhere in training, and the model was being fed an untrained
+# vector on the one axis it always saw.
+#
+# Values below are quoted in the units `build_condition` expects, which are
+# not uniform: `mic_um`/`hc50_um` are raw micromolar, `gram_selectivity` is a
+# raw log10 ratio, `gravy` is a raw GRAVY score, while `charge_per_res` and
+# `mu_h` are passed through already normalized onto [0, 1]. Ranges are taken
+# from the generator's own training corpus so the grid stays on-distribution.
+# --------------------------------------------------------------------------- #
+
+#: Strain counts double as sampling weights, reproducing the panel's 15:5
+#: Gram-negative:Gram-positive composition. `build_condition` derives the
+#: `gram` axis from the species, so it does not need to be specified.
+GRID_SPECIES = tuple(PANEL_WEIGHTS.items())
+
+#: Target MIC. All at or below the competition's 16 uM threshold, spanning the
+#: training corpus's 5th to 50th percentile (0.78 to 12.5 uM).
+GRID_MIC_UM = (2.0, 4.0, 8.0)
+
+#: Target HC50, high meaning non-hemolytic. Above the training median of
+#: 105 uM and below its 95th percentile of 258 uM.
+GRID_HC50_UM = (128.0, 256.0)
+
+#: log10(MIC gram-positive / MIC gram-negative). Positive favours activity
+#: against Gram-negatives, which is 15 of the 20 panel strains; the negative
+#: rung is retained because Gram-Positive Activity is a separate award and the
+#: eligibility floor requires activity in both classes. Training spans
+#: -0.92 to +0.80.
+GRID_SELECTIVITY = ((-0.5, 25), (0.0, 40), (0.5, 35))
+
+#: Normalized charge per residue; training p5/p50/p95 are 0.460/0.591/0.750.
+#: Deliberately stopping short of the top of the range: a library collapsed
+#: onto one high-charge mode scores badly on diversity even when every member
+#: is individually plausible.
+GRID_CHARGE_PER_RES = (0.50, 0.59, 0.68)
+
+#: Normalized hydrophobic moment; training p5/p50/p95 are 0.187/0.536/0.925.
+GRID_MU_H = (0.30, 0.55, 0.80)
+
+#: Raw GRAVY; training p5/p50/p95 are -1.94/-0.16/+1.32.
+GRID_GRAVY = (-1.2, -0.2, 0.8)
+
+#: Cysteine class 1 is zero-cysteine. Class 2 (two cysteines) is excluded on
+#: compliance grounds rather than modelling grounds: two free cysteines on a
+#: linear peptide oxidise to an intramolecular disulfide under standard
+#: synthesis and handling, and the rules require linear peptides. Its share of
+#: the training corpus is redistributed across the rest of the grid.
+GRID_CYS_CLASS = 1
+
 
 def set_global_determinism(seed: int) -> None:
     """Pin every RNG we might touch.
@@ -212,6 +270,96 @@ def _load_calibration() -> dict:
     )
 
 
+def build_request_grid() -> list[tuple[dict, int]]:
+    """The conditioning cells, each with an integer weight.
+
+    Cells are the full cross product of the swept axes, so ordering is a
+    deterministic function of the constants above and does not depend on any
+    RNG. Weights multiply, and counts are allocated from them by largest
+    remainder so the totals land exactly.
+    """
+    cells: list[tuple[dict, int]] = []
+    for species, species_w in GRID_SPECIES:
+        for mic in GRID_MIC_UM:
+            for hc50 in GRID_HC50_UM:
+                for selectivity, sel_w in GRID_SELECTIVITY:
+                    for charge in GRID_CHARGE_PER_RES:
+                        for mu_h in GRID_MU_H:
+                            for gravy in GRID_GRAVY:
+                                cells.append((
+                                    {
+                                        "is_amp": "amp",
+                                        "species": species,
+                                        "mic_um": mic,
+                                        "mic_censored": False,
+                                        "hc50_um": hc50,
+                                        "hc50_source": "predicted",
+                                        "gram_selectivity": selectivity,
+                                        "charge_per_res": charge,
+                                        "mu_h": mu_h,
+                                        "gravy": gravy,
+                                        "cys_class": GRID_CYS_CLASS,
+                                    },
+                                    species_w * sel_w,
+                                ))
+    return cells
+
+
+def _allocate(weights: list[int], total: int) -> list[int]:
+    """Split `total` across `weights`, summing exactly. Largest remainder."""
+    weight_sum = float(sum(weights))
+    exact = [total * w / weight_sum for w in weights]
+    counts = [int(x) for x in exact]
+    remainder = total - sum(counts)
+    if remainder:
+        # Deterministic tie-break on index, so the same weights always give
+        # the same allocation.
+        order = sorted(range(len(weights)),
+                       key=lambda i: (-(exact[i] - counts[i]), i))
+        for i in order[:remainder]:
+            counts[i] += 1
+    return counts
+
+
+def conditioned_grid(
+    total: int, lengths: np.ndarray, species_vocab: dict, device: str
+):
+    """Build one condition covering the whole grid, with per-sample lengths.
+
+    `build_condition` is called once per cell rather than once per sample --
+    4,374 calls instead of 80,000 -- and the length axis is then overwritten
+    vectorized. Crossing length into the cells themselves would multiply the
+    call count by the 43 distinct lengths for no benefit, since length is
+    independent of the other axes here.
+    """
+    import torch
+
+    cells = build_request_grid()
+    counts = _allocate([w for _, w in cells], total)
+    if len(lengths) != total:
+        raise ValueError(f"expected {total} lengths, got {len(lengths)}")
+
+    blocks = []
+    cursor = 0
+    for (request, _), count in zip(cells, counts):
+        if count <= 0:
+            continue
+        block = build_condition(request, count, species_vocab, device=device)
+        span = lengths[cursor:cursor + count]
+        cursor += count
+        normalized = np.clip(
+            (span.astype(np.float64) - MIN_PEPTIDE_LENGTH) / LENGTH_SPAN, 0.0, 1.0
+        )
+        block["length_norm"] = torch.tensor(
+            normalized, dtype=torch.float32, device=device
+        ).view(count, 1)
+        block["length_norm_mask"] = torch.ones(count, 1, device=device)
+        blocks.append(block)
+
+    keys = blocks[0].keys()
+    return {k: torch.cat([b[k] for b in blocks], dim=0) for k in keys}
+
+
 def _structural_cluster(sequence: str) -> int:
     """Coarse deterministic bucket used to cap correlated failure in the top 100.
 
@@ -257,8 +405,17 @@ def generate_library(
             break
         ask = int(remaining * OVERSAMPLE) + 1
 
+        # Lengths are drawn to match the reference distribution and then
+        # shuffled, so every conditioning cell sees the whole length range
+        # rather than a contiguous slice of it. Seeded per round, so the
+        # assignment is a function of the base seed alone.
         counts = empirical_length_counts(reference_lengths, ask)
-        condition = length_grid(request, counts, species_vocab, device=device)
+        pool = np.repeat(
+            np.array(list(counts.keys()), dtype=np.int64),
+            np.array(list(counts.values()), dtype=np.int64),
+        )
+        np.random.default_rng(seed + round_index).shuffle(pool)
+        condition = conditioned_grid(len(pool), pool, species_vocab, device=device)
 
         raw = sample_library(
             model,
@@ -270,9 +427,15 @@ def generate_library(
             # Derived, not reused: identical seeds would make every round draw
             # the same sequences and the loop would never converge.
             seed=seed + round_index,
-            free_length=True,
+            # The requested length is a hard constraint. With free_length the
+            # model places PAD itself, and a positive pad bias then overrides
+            # the request: the previous run asked for 12% of samples above 29
+            # residues and produced none, losing the whole 30-50 band that the
+            # reference set occupies. Verified on CPU that this reproduces the
+            # requested length exactly at 10, 25 and 45.
+            free_length=False,
             reveal=reveal,
-            pad_bias=pad_bias,
+            pad_bias=0.0,
         )
 
         # Cheap filters first, so the identity scan only sees survivors.
@@ -367,10 +530,20 @@ def score_candidates(sequences: list[str], oracle: Oracle) -> list[Candidate]:
     overall = metrics["overall"]
     eligible = (metrics["gram_negative"] > 0) & (metrics["gram_positive"] > 0)
 
-    # Tie-break by potency, scaled far below one strain's worth of success
-    # rate so it can never outrank a genuine breadth difference.
-    tiebreak = -metrics["mean_log_mic"] * 1e-3
-    score = overall + tiebreak - np.where(eligible, 0.0, 10.0)
+    # Primary key is the strain-weighted mean predicted log10 MIC, negated so
+    # that higher is better. Success rate was the natural objective -- it is
+    # what four of the five award categories score -- but it does not
+    # discriminate among the candidates that actually compete. It is not
+    # saturated across the library: only about 40% of candidates fall below
+    # 16 uM on the weighted mean. It saturates among the top-ranked, which are
+    # the only ones in contention for 100 slots out of 50,000, and a key that
+    # is constant over every contender orders nothing. Mean predicted MIC
+    # keeps its variance and carries the same strain weighting, so the
+    # ranking discriminates again without touching the grid.
+    #
+    # Success rate is still computed and reported, as a diagnostic on whether
+    # the objective has collapsed.
+    score = -metrics["mean_log_mic"] - np.where(eligible, 0.0, 10.0)
 
     print(
         f"panel   : {int(eligible.sum())}/{len(sequences)} candidates clear the "
@@ -382,8 +555,14 @@ def score_candidates(sequences: list[str], oracle: Oracle) -> list[Candidate]:
         f"Gram-negative {metrics['gram_negative'].mean():.3f}, "
         f"Gram-positive {metrics['gram_positive'].mean():.3f}"
     )
+    saturated = float((overall >= 1.0).mean())
+    print(
+        f"          success rate saturated at 1.00 for {100*saturated:.1f}% of "
+        f"candidates; ranking on mean predicted log10 MIC "
+        f"(median {np.median(metrics['mean_log_mic']):.3f})"
+    )
 
-    return [
+    candidates = [
         Candidate(
             sequence=seq,
             mean_score=float(value),
@@ -392,6 +571,44 @@ def score_candidates(sequences: list[str], oracle: Oracle) -> list[Candidate]:
         )
         for seq, value in zip(sequences, score)
     ]
+    metrics["eligible"] = eligible
+    return candidates, metrics
+
+
+def _report_selection(top, ranked, metrics, info, reference_identity, library) -> None:
+    """Print the diagnostics the selection has to be judged on.
+
+    The panel score takes only 21 distinct values, so ties are enormous. If
+    the selected hundred all sit in one or two tiers then the ordering was in
+    practice decided by the tie-break -- mean predicted MIC, the noisier
+    quantity -- and that should be visible rather than implied.
+    """
+    index = {seq: i for i, seq in enumerate(library)}
+    picked = [index[c.sequence] for c in top]
+    overall = metrics["overall"][picked]
+    ident = np.asarray(reference_identity)[picked]
+
+    print(f"\nselection: internal identity ceiling {info['internal_ceiling']:.2f}"
+          f"{' (RELAXED from %.2f)' % INTERNAL_IDENTITY_LADDER[0] if info['ladder_relaxed'] else ''}"
+          f", {info['eligible']}/{len(ranked)} ranked candidates eligible")
+
+    tiers, counts = np.unique(np.round(overall, 4), return_counts=True)
+    print(f"  panel score distribution across the selected {len(top)}:")
+    for tier, count in sorted(zip(tiers, counts), key=lambda x: -x[0]):
+        bar = "#" * int(round(40 * count / max(counts)))
+        print(f"    {tier:.2f}  n={count:3d}  {bar}")
+    if len(tiers) <= 2:
+        print("    NOTE: the selection occupies <=2 score tiers, so the ordering "
+              "was effectively decided by mean predicted MIC, not by breadth.")
+
+    print(f"  Gram-negative success rate: mean {metrics['gram_negative'][picked].mean():.3f}")
+    print(f"  Gram-positive success rate: mean {metrics['gram_positive'][picked].mean():.3f}")
+    picked_mic = metrics["mean_log_mic"][picked]
+    print(f"  mean predicted log10 MIC  : median {np.median(picked_mic):.3f}  "
+          f"range {picked_mic.min():.3f} to {picked_mic.max():.3f}  "
+          f"(library median {np.median(metrics['mean_log_mic']):.3f})")
+    print(f"  max identity vs reference : max {ident.max():.4f}  "
+          f"median {np.median(ident):.4f}  min {ident.min():.4f}")
 
 
 def main() -> None:
@@ -406,7 +623,11 @@ def main() -> None:
     parser.add_argument("--kappa", type=float, default=1.5,
                         help="Risk aversion in top-K selection. Inert while the "
                              "oracle is a single model (score_std is 0).")
-    parser.add_argument("--max-per-cluster", type=int, default=4)
+    parser.add_argument("--overflow-k", type=int, default=500,
+                        help="Length of the ranked overflow list written to "
+                             "docs/. The organizers replace an invalid "
+                             "top-100 entry with the next valid candidate, so "
+                             "the ordering past 100 is used.")
     parser.add_argument("--identity-ceiling", type=float, default=SAFETY_CEILING,
                         help="Max Levenshtein ratio to any reference sequence. "
                              "The validator fails above 0.80; default leaves margin.")
@@ -445,20 +666,38 @@ def main() -> None:
     if not report.ok:
         sys.exit(1)
 
-    candidates = score_candidates(library, oracle)
-    top = select_top(
+    candidates, metrics = score_candidates(library, oracle)
+
+    # Computed once for the whole library rather than per candidate inside the
+    # greedy loop, where it would dominate the cost.
+    reference_identity = novelty.max_identity(library)
+
+    ranked, info = select_top_diverse(
         candidates,
         novelty=novelty,
-        k=args.top_k,
+        reference_identity=reference_identity,
+        k=args.overflow_k,
+        min_required=args.top_k,
         kappa=args.kappa,
-        max_per_cluster=args.max_per_cluster,
-        identity_ceiling=args.identity_ceiling,
+        reference_ceiling=args.identity_ceiling,
     )
+    top = ranked[:args.top_k]
     top_sequences = [c.sequence for c in top]
 
     top_path = out_dir / "top.fasta"
     write_fasta(top_sequences, top_path)
     print(f"top     : {len(top_sequences)} sequences -> {top_path}")
+
+    # The organizers replace an invalid top-100 entry with "the next valid
+    # candidate", so the ordering past rank 100 is used. Writing it out keeps
+    # that replacement inside our procedure. Deliberately not in the output
+    # directory, which the template expects to hold exactly library.fasta and
+    # top.fasta.
+    overflow_path = _REPO_ROOT / "docs" / "top500_overflow.fasta"
+    write_fasta([c.sequence for c in ranked], overflow_path, prefix="rank")
+    print(f"overflow: {len(ranked)} ranked sequences -> {overflow_path}")
+
+    _report_selection(top, ranked, metrics, info, reference_identity, library)
 
     top_report = verify_top(top_sequences, library, references=references,
                             top_k=args.top_k)

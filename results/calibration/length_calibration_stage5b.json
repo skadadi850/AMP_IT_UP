@@ -1,0 +1,8 @@
+{
+  "best_pad_bias": 0.5,
+  "ks_length_vs_train": 0.06854252158391949,
+  "calibration_reference": "training folds only (fold != 0)",
+  "calibration_seed": 7,
+  "reveal": "structured",
+  "checkpoint": "/home/skadadi/Antimicrobial_Peptide_Project/AMP_IT_UP/checkpoint/masked_diffusion_best.pt"
+}

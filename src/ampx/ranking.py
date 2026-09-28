@@ -130,6 +130,107 @@ def select_top(
     return chosen
 
 
+#: Pairwise identity ceiling between two *selected* candidates, and the
+#: deterministic ladder used if it cannot be met.
+#:
+#: 0.60 rather than the 0.80 used against the reference set. The external
+#: ceiling is a compliance limit; this one is a design choice, and 0.80 is far
+#: too permissive internally -- two peptides at 0.79 identity are effectively
+#: one molecule, and 25 of the hundred are drawn at random, so near-duplicates
+#: convert a diverse-looking list into correlated failure. The ladder never
+#: passes 0.80: selecting two candidates more similar to each other than we
+#: allow against references would be indefensible.
+INTERNAL_IDENTITY_CEILING = 0.60
+INTERNAL_IDENTITY_LADDER = (0.60, 0.65, 0.70, 0.75)
+
+#: A candidate below this score failed the Gram-class eligibility floor, which
+#: `score_candidates` encodes as a -10 penalty.
+ELIGIBLE_SCORE_FLOOR = -5.0
+
+
+def select_top_diverse(
+    candidates: list[Candidate],
+    novelty,
+    reference_identity: np.ndarray | None = None,
+    k: int = 100,
+    min_required: int = 100,
+    kappa: float = 1.5,
+    reference_ceiling: float = SAFETY_CEILING,
+    ladder: tuple[float, ...] = INTERNAL_IDENTITY_LADDER,
+) -> tuple[list[Candidate], dict]:
+    """Greedy selection: best score subject to a pairwise identity ceiling.
+
+    Score-first, diversity-as-a-constraint. A weighted objective would need an
+    exchange rate between success-rate points and identity points that cannot
+    be calibrated from anything we have; a hard ceiling is interpretable and
+    can be stated plainly in the method disclosure.
+
+    Returns `k` candidates in rank order, so the caller can take the first 100
+    as the submission and keep the rest as an ordered overflow. The organizers
+    replace an invalid top-100 entry with "the next valid candidate", so the
+    ordering past rank 100 is used and must come from this procedure rather
+    than theirs.
+
+    `reference_identity`, when given, is the precomputed maximum identity of
+    each candidate against the reference set, aligned with `candidates`. The
+    library is already screened below the ceiling during generation, so this
+    re-check should never reject; it is kept because the guarantee has to hold
+    at the point of selection, and passing the array in makes it free.
+
+    Raises SystemExit if fewer than `min_required` candidates clear the
+    eligibility floor at every rung of the ladder. That is deliberately fatal:
+    it means the library is wrong, and quietly relaxing the constraint would
+    hide that.
+    """
+    from rapidfuzz import fuzz, process
+
+    # Ties are enormous -- the panel score takes only 21 distinct values -- so
+    # the sequence is a deterministic final key rather than leaving ordering
+    # to sort stability over an arbitrary input order.
+    order = sorted(range(len(candidates)),
+                   key=lambda i: (-candidates[i].lcb(kappa), candidates[i].sequence))
+
+    for ceiling in ladder:
+        chosen: list[int] = []
+        chosen_seqs: list[str] = []
+        for i in order:
+            if len(chosen) >= k:
+                break
+            cand = candidates[i]
+            if reference_identity is not None:
+                if float(reference_identity[i]) > reference_ceiling:
+                    continue
+            elif float(novelty.max_identity([cand.sequence])[0]) > reference_ceiling:
+                continue
+            if chosen_seqs:
+                sims = process.cdist([cand.sequence], chosen_seqs,
+                                     scorer=fuzz.ratio, workers=1)
+                if float(sims.max()) / 100.0 > ceiling:
+                    continue
+            chosen.append(i)
+            chosen_seqs.append(cand.sequence)
+
+        eligible = sum(1 for i in chosen if candidates[i].mean_score > ELIGIBLE_SCORE_FLOOR)
+        if eligible >= min_required:
+            selected = [candidates[i] for i in chosen]
+            return selected, {
+                "internal_ceiling": ceiling,
+                "ladder_relaxed": ceiling != ladder[0],
+                "selected": len(selected),
+                "eligible": eligible,
+                "indices": chosen,
+            }
+
+    raise SystemExit(
+        f"only {eligible} candidates cleared the Gram-class eligibility floor "
+        f"while satisfying a pairwise identity ceiling of {ladder[-1]:.2f}, "
+        f"against {min_required} required. This is not a selection problem: "
+        "it means the library does not contain enough peptides predicted "
+        "active against both Gram classes. Widen the conditioning grid or "
+        "regenerate; do not relax the floor."
+    )
+
+
 def expected_team_score(
     predicted: np.ndarray,
     n_draw: int = 25,
