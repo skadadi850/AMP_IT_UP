@@ -1,4 +1,6 @@
-# ampx -- AMP Challenge 2027 submission
+# CMD_AMP -- AMP Challenge 2027 submission
+
+This repo contains our implementation of Conditioned Masked Discrete Diffusion for Antimicrobial Peptide Design (AMP Challenge - NeurIPS 2026 Competition Track).
 
 Generative design of linear antimicrobial peptides for the
 [AMP Challenge](https://szczurek-lab.github.io/amp-challenge-website/)
@@ -64,8 +66,3 @@ See [docs/METHOD.md](docs/METHOD.md).
 ## License
 
 MIT. See [LICENSE](LICENSE).
-
-## AI assistant disclosure
-
-Per the NeurIPS Main Track Handbook, use of LLM assistants must be disclosed in
-the method documentation. Record it in `docs/METHOD.md`.
