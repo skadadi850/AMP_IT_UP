@@ -18,6 +18,52 @@ See [../data/README.md](../data/README.md) for the full provenance table.
 - **Predictor corpus:** _(EV positives/negatives, synthetic negatives, counts)_
 - **Splits:** MMseqs2 clustering at 40% identity, cluster-disjoint.
 
+### Harmonized activity table
+
+`data/processed/activity_harmonized.csv` is committed to this repository rather
+than rebuilt at run time. It is the table `scripts/build_dataset.py` writes and
+the MIC regressor trains on, with columns `sequence, species, strain, endpoint,
+value_um, censored, source`.
+
+It previously existed here only as a header-only stub, which would have made
+the training-data disclosure unverifiable. The real table was recovered from
+the cluster at
+`$D/processed/conditioned/activity_harmonized.csv`
+(where `$D` is defined in the source repository's `scripts/hpc/env.sh`) and
+committed whole. At 5.3 MB it is small enough to version directly, so no
+fetch step or rebuild is required to check our numbers.
+
+Row counts, verified against the committed file:
+
+| Partition | Rows |
+|---|---|
+| Total | 80,473 |
+| `endpoint == "mic"` | 39,117 |
+| `endpoint == "hc50"` | 41,356 |
+
+Replicate measurements are collapsed upstream by geometric mean in log10
+space, so a peptide assayed repeatedly against one species contributes one
+row and cannot dominate the fit.
+
+### Version pinning of shipped checkpoints
+
+The inference dependencies in `pyproject.toml` pin `torch`, `transformers` and
+`xgboost` to exact versions, because each determines how a shipped checkpoint
+is read rather than merely how fast it runs:
+
+- **`xgboost==3.2.0`** — the version recorded in `checkpoints/mic_regressor.json`'s
+  own `version` field. That model holds 1,807 trees with `best_iteration=1706`,
+  so 101 trees sit past the early-stopping point. Whether a reader truncates at
+  `best_iteration` or predicts with every tree has changed across XGBoost
+  releases, and the two answers give different MIC estimates and therefore a
+  different top 100.
+- **`transformers==5.17.0`** — produced the 480-dimensional ESM-2 embedding
+  block. The regressor's 510 input features are 9 descriptors, 16 species
+  indicators, 5 Gram indicators and those 480 embedding dimensions, so a
+  different encoder yields a feature matrix of the wrong width or the wrong
+  meaning.
+- **`torch==2.11.0`** — trained `checkpoints/masked_diffusion_best.pt`.
+
 ## Generative model
 
 - Architecture:

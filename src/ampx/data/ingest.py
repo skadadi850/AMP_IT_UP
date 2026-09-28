@@ -1,193 +1,414 @@
-"""Ingest arbitrary peptide data drops into one canonical table.
+"""
+Harmonization of raw activity exports into one table.
 
-The problem this solves: every AMP database exports a different shape. DBAASP
-gives you TSV with MIC columns and unit strings. AMPSphere gives compressed
-FASTA. Peptipedia gives CSV with activity flags. MarLys gives FASTA with
-metadata crammed into the header. If you write a bespoke parser per source you
-will spend a week on plumbing and still lose track of which sequence came from
-where -- and provenance is a *submission requirement*.
+Every MIC/HC50 source you add reports concentration differently: ug/mL vs
+uM vs nM, ">128" vs "128" vs "128-256", per-strain vs per-species. This
+module reduces all of it to a single schema so that adding a source is a
+column mapping rather than a new code path.
 
-So: drop whatever you downloaded into `data/raw/<source_id>/`, describe it once
-in `sources.py`, and this module produces a single long-format table with one
-row per (sequence, source) and a provenance manifest recording exactly what was
-read.
+Output schema, one row per (sequence, species, endpoint):
 
-Canonical output columns:
-
-    sequence      str    upper-case, standard residues only
-    length        int
-    source        str    source_id from the registry
-    role          str    'positive' | 'negative' | 'general' | 'reference'
-    label         float  1.0 active, 0.0 inactive, NaN unknown
-    mic_ugml      float  MIC in ug/mL if available, else NaN
-    strain        str    strain/species string if available, else ''
-    src_id        str    the source's own accession, if any
+    sequence        cleaned, standard residues only
+    species         lowercase binomial, or NaN
+    strain          free text, retained as provenance only
+    endpoint        'mic' or 'hc50'
+    value_um        concentration in uM
+    censored        False for an exact value, True for right-censored
+    source          provenance label
 """
 
 from __future__ import annotations
 
-import csv
-import gzip
-import io
 import re
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Iterator
 
-STANDARD = frozenset("ACDEFGHIKLMNPQRSTVWY")
+import numpy as np
+import pandas as pd
 
-#: Competition bounds. Sequences outside this cannot be submitted, but they can
-#: still be useful for *training* the representation -- so filtering to this
-#: range is a per-use decision, not something ingest should force.
-MIN_LEN, MAX_LEN = 8, 50
+from ..models.features import clean_sequence, is_valid_sequence, peptide_mass
 
+ENDPOINTS = ("mic", "hc50")
 
-# --------------------------------------------------------------------------- #
-# Low-level readers
-# --------------------------------------------------------------------------- #
+# Multiplicative factors onto uM for concentration units that are already
+# molar. Mass-per-volume units need the peptide mass and are handled apart.
+MOLAR_UNIT_FACTORS = {
+    "m": 1e6,
+    "mm": 1e3,
+    "um": 1.0,
+    "µm": 1.0,
+    "μm": 1.0,
+    "nm": 1e-3,
+    "pm": 1e-6,
+    "mol/l": 1e6,
+    "mmol/l": 1e3,
+    "umol/l": 1.0,
+    "µmol/l": 1.0,
+    "nmol/l": 1e-3,
+}
 
-def _open_maybe_gzip(path: Path) -> io.TextIOBase:
-    """Open a file transparently whether or not it is gzipped."""
-    if path.suffix == ".gz":
-        return gzip.open(path, "rt", errors="replace")
-    return open(path, "r", errors="replace")
+# Factors onto ug/mL for mass-per-volume units.
+MASS_UNIT_FACTORS = {
+    "ug/ml": 1.0,
+    "µg/ml": 1.0,
+    "μg/ml": 1.0,
+    "mcg/ml": 1.0,
+    "mg/l": 1.0,
+    "ug/l": 1e-3,
+    "mg/ml": 1e3,
+    "g/l": 1e3,
+    "ng/ml": 1e-3,
+    "ng/ul": 1.0,
+}
 
-
-def read_fasta(path: Path) -> Iterator[tuple[str, str]]:
-    """Yield (header, sequence) pairs. Handles multi-line and gzip."""
-    header: str | None = None
-    parts: list[str] = []
-    with _open_maybe_gzip(path) as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith(">"):
-                if header is not None:
-                    yield header, "".join(parts)
-                header, parts = line[1:], []
-            else:
-                parts.append(line)
-    if header is not None:
-        yield header, "".join(parts)
-
-
-def read_table(path: Path) -> Iterator[dict[str, str]]:
-    """Yield rows as dicts. Sniffs delimiter; handles gzip."""
-    with _open_maybe_gzip(path) as fh:
-        sample = fh.read(64_000)
-        fh.seek(0)
-        try:
-            dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")
-            delim = dialect.delimiter
-        except csv.Error:
-            delim = "\t" if "\t" in sample else ","
-        for row in csv.DictReader(fh, delimiter=delim):
-            yield row
+_NUMBER = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
 
 
-# --------------------------------------------------------------------------- #
-# Canonicalization
-# --------------------------------------------------------------------------- #
+def normalize_unit(unit) -> str:
+    if unit is None or (isinstance(unit, float) and np.isnan(unit)):
+        return ""
+    text = str(unit).strip().lower()
+    text = text.replace(" ", "").replace("−", "-")
+    text = text.replace("micro", "u").replace("μ", "u").replace("µ", "u")
+    return text
 
-_WS = re.compile(r"\s+")
 
-
-def canonical_sequence(raw: str) -> str | None:
-    """Normalise a sequence string, or return None if unusable.
-
-    Rejects anything containing a non-standard residue rather than silently
-    substituting. Substitution is how you end up training on peptides that do
-    not exist: `X` is not alanine, and a `B` or `Z` means the source could not
-    resolve the residue. `U` (selenocysteine) and `O` (pyrrolysine) are real but
-    non-proteinogenic-standard and are disallowed by the competition.
+def parse_value(raw) -> tuple:
     """
-    if not raw:
-        return None
-    seq = _WS.sub("", raw).upper().replace("-", "").replace("*", "")
-    if not seq:
-        return None
-    if set(seq) - STANDARD:
-        return None
-    return seq
+    Parse a concentration cell into (value, censored).
 
-
-#: MIC strings in the wild: ">128", "8.0", "4-8", "16 ug/ml", "1.5 uM", "NA".
-_MIC_NUM = re.compile(r"(\d+\.?\d*)")
-
-
-def parse_mic(raw: str | None, assume_um_mw: float | None = None) -> tuple[float | None, bool]:
-    """Parse a MIC cell into (value_ug_per_ml, is_censored).
-
-    Returns censored=True for '>' style entries, which matter enormously: a
-    right-censored MIC is *not* a missing value and it is *not* the number
-    shown. Treating '>128' as 128 biases every regression you fit; dropping it
-    throws away your strongest negative signal. Keep the flag and use interval
-    /Tobit regression. See docs/PLAN.md 2.2 (iii).
-
-    Ranges like '4-8' return the upper bound, which is the conservative choice.
-
-    If the source reports uM and you pass the peptide's molecular weight,
-    conversion is applied: ug/mL = uM * MW / 1000.
+    Handles bare numbers, comparison prefixes and ranges. A range is
+    reduced to its geometric mean, which is the right summary for a
+    quantity the model consumes in log space. A ">" prefix marks right
+    censoring; a "<" prefix is treated as exact at the stated bound, since
+    left censoring on a potency endpoint is not informative about how much
+    more potent the peptide really is.
     """
-    if raw is None:
-        return None, False
-    s = str(raw).strip()
-    if not s or s.lower() in {"na", "nan", "n/a", "none", "-", "nd"}:
-        return None, False
+    if raw is None or (isinstance(raw, float) and np.isnan(raw)):
+        return float("nan"), False
+    if isinstance(raw, (int, float)) and np.isfinite(raw):
+        return float(raw), False
 
-    censored = ">" in s or "≥" in s or ">=" in s
-    nums = _MIC_NUM.findall(s)
-    if not nums:
-        return None, censored
-    value = float(nums[-1])  # upper bound for ranges
+    text = str(raw).strip()
+    if not text:
+        return float("nan"), False
 
-    is_molar = bool(re.search(r"\b[uµ]m\b|micromolar", s, re.I))
-    if is_molar and assume_um_mw:
-        value = value * assume_um_mw / 1000.0
-
-    return value, censored
-
-
-# --------------------------------------------------------------------------- #
-# Records and manifest
-# --------------------------------------------------------------------------- #
-
-@dataclass
-class Record:
-    sequence: str
-    source: str
-    role: str
-    label: float | None = None
-    mic_ugml: float | None = None
-    mic_censored: bool = False
-    strain: str = ""
-    src_id: str = ""
-
-    @property
-    def length(self) -> int:
-        return len(self.sequence)
+    censored = text.startswith(">") or text.startswith("≥")
+    numbers = [float(m) for m in _NUMBER.findall(text)]
+    # Zero and non-finite parses are dropped, but negative numbers are kept:
+    # a log-scale source (e.g. GRAMPA's log10(uM) value) legitimately
+    # reports negatives, and positivity is enforced downstream in
+    # harmonize_activity after unit conversion to uM, not here.
+    numbers = [n for n in numbers if n != 0 and np.isfinite(n)]
+    if not numbers:
+        return float("nan"), False
+    if len(numbers) == 1:
+        return numbers[0], censored
+    return float(np.exp(np.mean(np.log(numbers[:2])))), censored
 
 
-@dataclass
-class IngestStats:
-    """Per-source accounting. Print this; it is how you catch a bad parse."""
+def to_micromolar(value: float, unit: str, sequence: str) -> float:
+    """
+    Convert a parsed concentration to uM.
 
-    source: str
-    files: list[str] = field(default_factory=list)
-    rows_read: int = 0
-    rejected_nonstandard: int = 0
-    rejected_empty: int = 0
-    kept: int = 0
-    with_label: int = 0
-    with_mic: int = 0
-    censored_mic: int = 0
+    An unrecognized or absent unit is assumed to be uM, which is what most
+    curated AMP databases export; the assumption is logged by the caller
+    through the count of unconverted rows rather than silently.
+    """
+    if not np.isfinite(value):
+        return float("nan")
+    key = normalize_unit(unit)
+    if key == "log10_um":
+        # GRAMPA's `value` column is log10(MIC in uM) despite its own `unit`
+        # column reading the misleading literal "uM" -- callers must pass
+        # this unit explicitly via default_unit, never read it off the file.
+        return 10.0 ** value
+    if key in MOLAR_UNIT_FACTORS:
+        return value * MOLAR_UNIT_FACTORS[key]
+    if key in MASS_UNIT_FACTORS:
+        mass = peptide_mass(sequence)
+        if not np.isfinite(mass) or mass <= 0:
+            return float("nan")
+        return value * MASS_UNIT_FACTORS[key] * 1000.0 / mass
+    if key == "":
+        return value
+    return float("nan")
 
-    def summary(self) -> str:
-        pct = 100.0 * self.kept / self.rows_read if self.rows_read else 0.0
-        return (
-            f"{self.source:<16} read={self.rows_read:>8,}  kept={self.kept:>8,} "
-            f"({pct:5.1f}%)  nonstd={self.rejected_nonstandard:>7,}  "
-            f"labels={self.with_label:>7,}  mic={self.with_mic:>7,} "
-            f"(censored {self.censored_mic:,})"
-        )
+
+# Maps an abbreviated genus initial plus epithet onto the full genus name.
+# The initial alone is ambiguous -- "A. faecalis" is Alcaligenes while
+# "E. faecalis" is Enterococcus -- so the key is always the (initial,
+# epithet) pair, never the initial by itself.
+ABBREVIATED_GENERA = {
+    ("a", "baumannii"): "acinetobacter",
+    ("a", "faecalis"): "alcaligenes",
+    ("b", "subtilis"): "bacillus",
+    ("b", "cereus"): "bacillus",
+    ("b", "anthracis"): "bacillus",
+    ("c", "albicans"): "candida",
+    ("c", "difficile"): "clostridioides",
+    ("c", "perfringens"): "clostridium",
+    ("e", "coli"): "escherichia",
+    ("e", "faecalis"): "enterococcus",
+    ("e", "faecium"): "enterococcus",
+    ("e", "cloacae"): "enterobacter",
+    ("h", "influenzae"): "haemophilus",
+    ("h", "pylori"): "helicobacter",
+    ("k", "pneumoniae"): "klebsiella",
+    ("l", "monocytogenes"): "listeria",
+    ("m", "luteus"): "micrococcus",
+    ("m", "tuberculosis"): "mycobacterium",
+    ("m", "smegmatis"): "mycobacterium",
+    ("n", "gonorrhoeae"): "neisseria",
+    ("n", "meningitidis"): "neisseria",
+    ("p", "aeruginosa"): "pseudomonas",
+    ("p", "mirabilis"): "proteus",
+    ("p", "vulgaris"): "proteus",
+    ("s", "aureus"): "staphylococcus",
+    ("s", "epidermidis"): "staphylococcus",
+    ("s", "pyogenes"): "streptococcus",
+    ("s", "pneumoniae"): "streptococcus",
+    ("s", "agalactiae"): "streptococcus",
+    ("s", "typhimurium"): "salmonella",
+    ("s", "enterica"): "salmonella",
+    ("s", "flexneri"): "shigella",
+    ("s", "marcescens"): "serratia",
+    ("v", "cholerae"): "vibrio",
+    ("v", "parahaemolyticus"): "vibrio",
+    ("y", "pestis"): "yersinia",
+    ("y", "enterocolitica"): "yersinia",
+}
+
+# Known misspellings found in the raw exports, keyed on the (already
+# lowercased, period-stripped) epithet as parsed. Corrected before the
+# abbreviated-genus lookup above, so a misspelled abbreviated form (e.g.
+# "A. baumanii") still resolves correctly.
+SPECIES_EPITHET_CORRECTIONS = {
+    "baumanii": "baumannii",
+}
+
+
+def normalize_species(raw) -> float | str:
+    """
+    Reduce a target label to a lowercase binomial.
+
+    Strain designations are stripped: DBAASP's per-strain coverage of any
+    given competition panel strain is too thin to fit a per-strain
+    embedding, so species is the modeling unit and strain survives only as
+    provenance.
+
+    Abbreviated genera ("E. coli") are expanded through ABBREVIATED_GENERA
+    and known misspellings are corrected, so "E. coli" and "Escherichia
+    coli" collapse to the same species and "A. baumanii" doesn't fragment
+    off from "A. baumannii" into its own near-empty bucket.
+    """
+    if raw is None or (isinstance(raw, float) and np.isnan(raw)):
+        return float("nan")
+    text = str(raw).strip()
+    if not text:
+        return float("nan")
+    text = re.sub(r"\(.*?\)", " ", text)
+    text = re.sub(r"[^A-Za-z. ]", " ", text)
+    tokens = [t for t in text.split() if t]
+    if not tokens:
+        return float("nan")
+    genus = tokens[0].lower().strip(".")
+    if len(tokens) == 1:
+        return genus
+    epithet = tokens[1].lower().strip(".")
+    if epithet in {"sp", "spp", "species"} or len(epithet) < 2:
+        return genus
+    epithet = SPECIES_EPITHET_CORRECTIONS.get(epithet, epithet)
+    if len(genus) == 1:
+        genus = ABBREVIATED_GENERA.get((genus, epithet), genus)
+    return f"{genus} {epithet}"
+
+
+def harmonize_activity(
+    frame: pd.DataFrame,
+    column_map: dict,
+    endpoint: str,
+    source: str,
+    default_unit: str | None = None,
+    row_filters: dict | None = None,
+) -> pd.DataFrame:
+    """
+    Convert one raw export into the common schema.
+
+    column_map keys, all optional except 'sequence' and 'value':
+        sequence, value, unit, species, strain, relation
+
+    'relation' is for sources that keep the comparison operator in its own
+    column instead of inside the value string.
+
+    row_filters is an optional {column: required_value} map applied before
+    anything else. GRAMPA needs this to drop YADAMP: YADAMP's
+    has_unusual_modification is False for every row only because that
+    source carries no modification annotation at all, not because its
+    peptides are verified unmodified, so has_unusual_modification alone
+    would silently admit ~4,000 rows of unknown provenance. Requiring
+    datasource_has_modifications == True as well excludes them correctly.
+    """
+    if endpoint not in ENDPOINTS:
+        raise ValueError(f"endpoint must be one of {ENDPOINTS}, got {endpoint!r}")
+    for required in ("sequence", "value"):
+        if required not in column_map:
+            raise ValueError(f"column_map is missing {required!r}")
+
+    if row_filters:
+        keep = pd.Series(True, index=frame.index)
+        for column, required_value in row_filters.items():
+            keep &= frame[column] == required_value
+        frame = frame[keep]
+
+    rows = []
+    unit_column = column_map.get("unit")
+    species_column = column_map.get("species")
+    strain_column = column_map.get("strain")
+    relation_column = column_map.get("relation")
+
+    for _, record in frame.iterrows():
+        sequence = clean_sequence(record[column_map["sequence"]])
+        if not is_valid_sequence(sequence):
+            continue
+
+        value, censored = parse_value(record[column_map["value"]])
+        if relation_column and relation_column in record:
+            relation = str(record[relation_column]).strip()
+            censored = censored or relation.startswith(">") or relation.startswith("≥")
+
+        unit = record[unit_column] if unit_column and unit_column in record else default_unit
+        value_um = to_micromolar(value, unit, sequence)
+        if not np.isfinite(value_um) or value_um <= 0:
+            continue
+
+        rows.append({
+            "sequence": sequence,
+            "species": normalize_species(record[species_column]) if species_column else float("nan"),
+            "strain": str(record[strain_column]) if strain_column and strain_column in record else "",
+            "endpoint": endpoint,
+            "value_um": float(value_um),
+            "censored": bool(censored),
+            "source": source,
+        })
+
+    return pd.DataFrame(rows, columns=[
+        "sequence", "species", "strain", "endpoint", "value_um", "censored", "source",
+    ])
+
+
+def aggregate_activity(activity: pd.DataFrame) -> pd.DataFrame:
+    """
+    Collapse replicate measurements to one value per (sequence, species,
+    endpoint).
+
+    The aggregate is the geometric mean of the exact measurements, since the
+    model consumes log10 concentration. Censored rows are only used when a
+    sequence-species pair has no exact measurement at all, in which case the
+    bound is kept and flagged, so that a peptide measured only as ">128" is
+    still usable as a weak-activity example without being read as potent.
+    """
+    if activity.empty:
+        return activity.assign(value_um=[], censored=[])
+
+    activity = activity.copy()
+    activity["species"] = activity["species"].fillna("__unknown__")
+
+    records = []
+    grouped = activity.groupby(["sequence", "species", "endpoint"], sort=False)
+    for (sequence, species, endpoint), block in grouped:
+        # HC50 provenance is not blended: a measured value always wins over
+        # a predicted one for the same sequence, rather than being averaged
+        # into it, since the predicted value carries no independent evidence
+        # once a real measurement exists.
+        hc50_source = np.nan
+        if endpoint == "hc50":
+            measured = block[block["source"] == "hemopi2_measured"]
+            if len(measured) > 0:
+                block = measured
+                hc50_source = "measured"
+            elif (block["source"] == "hemopi2_predicted").any():
+                hc50_source = "predicted"
+
+        exact = block.loc[~block["censored"], "value_um"]
+        if len(exact) > 0:
+            value = float(np.exp(np.mean(np.log(exact.values))))
+            censored = False
+        else:
+            value = float(block["value_um"].max())
+            censored = True
+        records.append({
+            "sequence": sequence,
+            "species": np.nan if species == "__unknown__" else species,
+            "endpoint": endpoint,
+            "value_um": value,
+            "censored": censored,
+            "n_measurements": int(len(block)),
+            "sources": ",".join(sorted(set(block["source"]))),
+            "hc50_source": hc50_source,
+        })
+
+    return pd.DataFrame(records)
+
+
+def build_metadata(
+    positives: pd.DataFrame,
+    activity: pd.DataFrame,
+    sequence_column: str = "sequence",
+) -> pd.DataFrame:
+    """
+    Join the aggregated activity onto the positive sequence set.
+
+    One row per (sequence, species) for sequences with MIC data, plus one
+    species-free row for every sequence without any. This is what makes a
+    single generator serve both the 40k unannotated MLAMP positives and the
+    few thousand with real MIC: the unannotated rows train the dense axes
+    and the sequence prior, the annotated rows train the potency axis.
+
+    HC50 is a peptide-level property, so it is broadcast across all species
+    rows for a sequence rather than joined per species.
+    """
+    positives = positives.copy()
+    positives[sequence_column] = positives[sequence_column].apply(clean_sequence)
+    positives = positives[positives[sequence_column].str.len() > 0]
+    positives = positives.drop_duplicates(subset=[sequence_column])
+
+    aggregated = aggregate_activity(activity) if not activity.empty else activity
+
+    if aggregated.empty:
+        frame = positives.copy()
+        frame["species"] = np.nan
+        frame["mic_um"] = np.nan
+        frame["mic_censored"] = np.nan
+        frame["hc50_um"] = np.nan
+        frame["hc50_source"] = np.nan
+        return frame.reset_index(drop=True)
+
+    mic = aggregated[aggregated["endpoint"] == "mic"].rename(
+        columns={"value_um": "mic_um", "censored": "mic_censored"}
+    )[["sequence", "species", "mic_um", "mic_censored"]]
+
+    def _prefer_hc50_source(sources: pd.Series) -> float | str:
+        values = set(sources.dropna())
+        if "measured" in values:
+            return "measured"
+        if "predicted" in values:
+            return "predicted"
+        return float("nan")
+
+    hc50 = aggregated[aggregated["endpoint"] == "hc50"].groupby("sequence", as_index=False).agg(
+        hc50_um=("value_um", lambda values: float(np.exp(np.mean(np.log(values))))),
+        hc50_source=("hc50_source", _prefer_hc50_source),
+    )
+
+    annotated = positives.merge(mic, on=sequence_column, how="inner")
+    unannotated = positives[~positives[sequence_column].isin(set(mic["sequence"]))].copy()
+    unannotated["species"] = np.nan
+    unannotated["mic_um"] = np.nan
+    unannotated["mic_censored"] = np.nan
+
+    frame = pd.concat([annotated, unannotated], ignore_index=True, sort=False)
+    frame = frame.merge(hc50, on=sequence_column, how="left")
+    if "hc50_um" not in frame.columns:
+        frame["hc50_um"] = np.nan
+    if "hc50_source" not in frame.columns:
+        frame["hc50_source"] = np.nan
+    return frame.reset_index(drop=True)

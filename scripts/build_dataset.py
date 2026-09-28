@@ -1,281 +1,230 @@
-"""Build the canonical peptide table from whatever is in data/raw/.
+"""
+Build the training metadata table.
 
-Typical workflow:
+Adding a new MIC or HC50 source is a JSON entry, not a code change. The
+source spec is a list of objects:
 
-    # 1. See what a download actually looks like before configuring it
-    uv run python scripts/build_dataset.py --inspect dbaasp
+[
+  {
+    "path": "data/raw/dbaasp_activity.csv",
+    "endpoint": "mic",
+    "source": "dbaasp",
+    "default_unit": "ug/ml",
+    "columns": {
+      "sequence": "SEQUENCE",
+      "value": "CONCENTRATION",
+      "unit": "UNIT",
+      "species": "TARGET_SPECIES",
+      "strain": "TARGET_STRAIN",
+      "relation": "CONCENTRATION_RELATION"
+    }
+  },
+  {
+    "path": "data/raw/dbaasp_hemolysis.csv",
+    "endpoint": "hc50",
+    "source": "dbaasp",
+    "default_unit": "ug/ml",
+    "columns": {"sequence": "SEQUENCE", "value": "CONCENTRATION", "unit": "UNIT"}
+  }
+]
 
-    # 2. Fix seq_col / mic_col in src/ampx/data/sources.py to match
+Only "sequence" and "value" are required in "columns". Unit handling,
+comparison operators, ranges and species normalization are all in
+ampgen.ingest, so a new database only needs its column names.
 
-    # 3. Build
-    uv run python scripts/build_dataset.py
-
-    # 4. Read the report. If a source shows kept=0 or a suspiciously low keep
-    #    rate, the column names are wrong -- go back to step 1.
-
-Outputs:
-
-    data/processed/peptides.csv     canonical long-format table
-    data/processed/manifest.md      provenance, paste into data/README.md
+Usage:
+    python scripts/build_dataset.py \
+        --positives data/raw/mlamp_positives.csv \
+        --sources data/raw/activity_sources.json \
+        --output data/processed
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
-import hashlib
-import sys
-from collections import Counter
+import json
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO / "src"))
+import numpy as np
+import pandas as pd
 
-from ampx.data.ingest import (  # noqa: E402
-    IngestStats,
-    Record,
-    canonical_sequence,
-    parse_mic,
-    read_fasta,
-    read_table,
+from ampx.models.compliance import read_fasta
+from ampx.models.features import (
+    attach_conditioning_features,
+    build_species_vocabulary,
+    clean_sequence,
+    is_valid_sequence,
 )
-from ampx.data.sources import SOURCES, SOURCES_BY_ID, Source  # noqa: E402
-
-RAW = REPO / "data" / "raw"
-PROCESSED = REPO / "data" / "processed"
-
-FIELDS = [
-    "sequence", "length", "source", "role", "label",
-    "mic_ugml", "mic_censored", "strain", "src_id",
-]
+from ampx.data.ingest import harmonize_activity
 
 
-def _files_for(src: Source) -> list[Path]:
-    folder = RAW / src.id
-    if not folder.exists():
-        return []
-    return sorted(p for p in folder.glob(src.glob) if p.is_file())
+def read_table(path: str) -> pd.DataFrame:
+    suffix = Path(path).suffix.lower()
+    if suffix in {".tsv", ".tab"}:
+        return pd.read_csv(path, sep="\t", low_memory=False)
+    if suffix in {".xlsx", ".xls"}:
+        return pd.read_excel(path)
+    return pd.read_csv(path, low_memory=False)
 
 
-def inspect(source_id: str) -> None:
-    """Print the real structure of a raw drop. Always do this first."""
-    src = SOURCES_BY_ID.get(source_id)
-    if src is None:
-        print(f"Unknown source '{source_id}'. Known: {sorted(SOURCES_BY_ID)}")
-        sys.exit(1)
-
-    files = _files_for(src)
-    print(f"\nSource   : {src.id}  ({src.name})")
-    print(f"Folder   : {RAW / src.id}")
-    print(f"Declared : kind={src.kind} role={src.role}")
-    if not files:
-        print("\nNo files found. Download the data into the folder above.")
-        return
-    print(f"Files    : {len(files)}")
-    for p in files[:10]:
-        print(f"           {p.name}  ({p.stat().st_size / 1e6:.1f} MB)")
-
-    head = files[0]
-    print(f"\n--- first records of {head.name} ---")
-    if src.kind == "fasta":
-        for i, (hdr, seq) in enumerate(read_fasta(head)):
-            print(f">{hdr}\n{seq[:80]}")
-            if i >= 2:
-                break
-    else:
-        rows = read_table(head)
-        try:
-            first = next(rows)
-        except StopIteration:
-            print("(empty)")
-            return
-        print("COLUMNS:")
-        for k in first:
-            print(f"  {k!r}")
-        print("\nSAMPLE ROWS:")
-        sample = [first]
-        for _, r in zip(range(2), rows):
-            sample.append(r)
-        for i, row in enumerate(sample):
-            print(f"  [{i}] " + "  ".join(f"{k}={v!r}" for k, v in list(row.items())[:6]))
-        print("\nSet seq_col / mic_col / label_col in sources.py to match the "
-              "column names above.")
+def read_positives(path: str, sequence_column: str) -> pd.DataFrame:
+    suffix = Path(path).suffix.lower()
+    if suffix in {".fasta", ".fa", ".faa"}:
+        return pd.DataFrame({sequence_column: read_fasta(path)})
+    frame = read_table(path)
+    if sequence_column not in frame.columns:
+        raise KeyError(f"{path} has no column {sequence_column!r}; columns are {list(frame.columns)}")
+    return frame
 
 
-def ingest_source(src: Source) -> tuple[list[Record], IngestStats]:
-    stats = IngestStats(source=src.id)
-    records: list[Record] = []
+def gram_selectivity(activity, metadata, sequence_column: str = "sequence"):
+    """
+    Per-sequence log10(MIC gram-positive / MIC gram-negative).
 
-    for path in _files_for(src):
-        stats.files.append(path.name)
+    Positive values mean the peptide is more potent against gram-negatives
+    (it takes more of it to inhibit a gram-positive). NaN where the peptide
+    lacks a MIC against either class, which leaves the axis masked for that
+    row exactly like any other missing conditioning value.
+    """
+    from ampx.models.features import gram_for_species
 
-        if src.kind == "fasta":
-            for hdr, raw in read_fasta(path):
-                stats.rows_read += 1
-                seq = canonical_sequence(raw)
-                if seq is None:
-                    if raw.strip():
-                        stats.rejected_nonstandard += 1
-                    else:
-                        stats.rejected_empty += 1
-                    continue
-                records.append(Record(
-                    sequence=seq, source=src.id, role=src.role,
-                    label=1.0 if src.role == "positive"
-                          else 0.0 if src.role == "negative" else None,
-                    src_id=hdr.split()[0] if hdr else "",
-                ))
-                stats.kept += 1
-                if src.role in ("positive", "negative"):
-                    stats.with_label += 1
+    mic = activity[(activity["endpoint"] == "mic") & activity["value_um"].gt(0)]
+    mic = mic.dropna(subset=["sequence", "species", "value_um"])
+    if mic.empty:
+        return pd.Series(np.nan, index=metadata.index)
 
-        else:
-            if not src.seq_col:
-                print(f"  ! {src.id}: kind='table' but seq_col is not set. "
-                      f"Run --inspect {src.id}")
-                continue
-            for row in read_table(path):
-                stats.rows_read += 1
-                seq = canonical_sequence(row.get(src.seq_col, ""))
-                if seq is None:
-                    stats.rejected_nonstandard += 1
-                    continue
+    mic = mic.assign(
+        log_mic=np.log10(mic["value_um"].astype(float)),
+        gram=mic["species"].apply(gram_for_species),
+    )
+    mic = mic[mic["gram"].isin(["negative", "positive"])]
 
-                label = None
-                if src.label_col:
-                    v = str(row.get(src.label_col, "")).strip().lower()
-                    if v:
-                        label = 1.0 if v in src.positive_values else 0.0
-                elif src.role == "positive":
-                    label = 1.0
-                elif src.role == "negative":
-                    label = 0.0
+    per_class = mic.groupby(["sequence", "gram"])["log_mic"].mean().unstack("gram")
+    if not {"negative", "positive"}.issubset(per_class.columns):
+        return pd.Series(np.nan, index=metadata.index)
 
-                mic, censored = (None, False)
-                if src.mic_col:
-                    mic, censored = parse_mic(row.get(src.mic_col))
-
-                records.append(Record(
-                    sequence=seq, source=src.id, role=src.role, label=label,
-                    mic_ugml=mic, mic_censored=censored,
-                    strain=str(row.get(src.strain_col, "")) if src.strain_col else "",
-                    src_id=str(row.get(src.id_col, "")) if src.id_col else "",
-                ))
-                stats.kept += 1
-                if label is not None:
-                    stats.with_label += 1
-                if mic is not None:
-                    stats.with_mic += 1
-                    if censored:
-                        stats.censored_mic += 1
-
-    return records, stats
-
-
-def write_manifest(all_stats: list[IngestStats], out: Path) -> None:
-    """Emit the provenance table required for disclosure."""
-    lines = [
-        "# Training data manifest",
-        "",
-        "Auto-generated by `scripts/build_dataset.py`. Copy into "
-        "`data/README.md` and fill any TODO license/version fields.",
-        "",
-        "| Source | Name | License | Accessed | Role | Files | Kept | Labels | MIC |",
-        "|---|---|---|---|---|---|---|---|---|",
-    ]
-    for st in all_stats:
-        src = SOURCES_BY_ID[st.source]
-        lines.append(
-            f"| `{src.id}` | {src.name} | {src.license} | {src.accessed} | "
-            f"{src.role} | {len(st.files)} | {st.kept:,} | {st.with_label:,} | "
-            f"{st.with_mic:,} |"
-        )
-    lines += ["", "## Notes", ""]
-    for st in all_stats:
-        src = SOURCES_BY_ID[st.source]
-        if src.notes:
-            lines.append(f"- **{src.id}**: {src.notes}")
-    out.write_text("\n".join(lines) + "\n")
-
-
-def build() -> None:
-    PROCESSED.mkdir(parents=True, exist_ok=True)
-
-    all_records: list[Record] = []
-    all_stats: list[IngestStats] = []
-
-    print("\nIngesting\n" + "-" * 78)
-    for src in SOURCES:
-        if not _files_for(src):
-            print(f"{src.id:<16} (no files in data/raw/{src.id}/ -- skipped)")
-            continue
-        recs, stats = ingest_source(src)
-        all_records.extend(recs)
-        all_stats.append(stats)
-        print(stats.summary())
-
-    if not all_records:
-        print("\nNothing ingested. Download data into data/raw/<source_id>/ "
-              "and check sources.py.")
-        return
-
-    # Deduplicate on (sequence, source) so the same peptide appearing in two
-    # databases is kept twice -- agreement across independent sources is signal,
-    # and collapsing it early destroys the ability to weight by it later.
-    seen: set[tuple[str, str]] = set()
-    unique: list[Record] = []
-    for r in all_records:
-        key = (r.sequence, r.source)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(r)
-
-    out_csv = PROCESSED / "peptides.csv"
-    with open(out_csv, "w", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=FIELDS)
-        w.writeheader()
-        for r in unique:
-            w.writerow({
-                "sequence": r.sequence, "length": r.length, "source": r.source,
-                "role": r.role,
-                "label": "" if r.label is None else r.label,
-                "mic_ugml": "" if r.mic_ugml is None else r.mic_ugml,
-                "mic_censored": int(r.mic_censored),
-                "strain": r.strain, "src_id": r.src_id,
-            })
-
-    write_manifest(all_stats, PROCESSED / "manifest.md")
-
-    seqs = {r.sequence for r in unique}
-    roles = Counter(r.role for r in unique)
-    in_range = sum(1 for s in seqs if 8 <= len(s) <= 50)
-    digest = hashlib.sha256("".join(sorted(seqs)).encode()).hexdigest()[:16]
-
-    print("-" * 78)
-    print(f"rows written      : {len(unique):,}")
-    print(f"unique sequences  : {len(seqs):,}")
-    print(f"  within 8-50 aa  : {in_range:,} ({100*in_range/len(seqs):.1f}%)")
-    print(f"by role           : {dict(roles)}")
-    print(f"corpus fingerprint: {digest}")
-    print(f"\n  -> {out_csv}")
-    print(f"  -> {PROCESSED / 'manifest.md'}")
-    print("\nNext: uv run python scripts/cluster_split.py")
+    ratio = (per_class["positive"] - per_class["negative"]).dropna()
+    print(f"gram selectivity     : {len(ratio)} sequences measured against both classes")
+    return metadata[sequence_column].map(ratio)
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(
-        description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--positives", required=True)
+    parser.add_argument(
+        "--negatives", default=None,
+        help="FASTA of general (non-AMP) short peptides, e.g. filtered sORFdb",
     )
-    ap.add_argument("--inspect", metavar="SOURCE_ID",
-                    help="Print the real structure of a raw drop and exit.")
-    args = ap.parse_args()
+    parser.add_argument("--sources", default=None, help="JSON activity source spec")
+    parser.add_argument("--output", default="data/processed")
+    parser.add_argument("--sequence-column", default="sequence")
+    parser.add_argument("--min-species-count", type=int, default=20)
+    parser.add_argument(
+        "--label-column", default="label",
+        help="column marking AMP membership; ignored if absent",
+    )
+    parser.add_argument("--label-value", type=int, default=1)
+    args = parser.parse_args()
 
-    if args.inspect:
-        inspect(args.inspect)
-    else:
-        build()
+    output = Path(args.output)
+    output.mkdir(parents=True, exist_ok=True)
+
+    positives = read_positives(args.positives, args.sequence_column)
+
+    # The MLAMP export carries its own negatives (tier == non_amp_function).
+    # Training a generator on those teaches it to produce non-AMPs, so they
+    # are dropped here rather than relied on to be absent.
+    if args.label_column in positives.columns:
+        before = len(positives)
+        positives = positives[positives[args.label_column] == args.label_value]
+        print(
+            f"positives: kept {len(positives)} of {before} rows with "
+            f"{args.label_column} == {args.label_value}"
+        )
+
+    positives[args.sequence_column] = positives[args.sequence_column].apply(clean_sequence)
+    before = len(positives)
+    positives = positives[positives[args.sequence_column].apply(is_valid_sequence)]
+    print(f"positives: {len(positives)} of {before} inside the 8-50 residue, standard-residue window")
+
+    # General (non-AMP) short peptides for the is_amp contrast. Every sparse
+    # axis (species, MIC, HC50) stays absent for these rows -- there is no
+    # MIC for a sORFdb sequence and none is asserted -- only is_amp_idx=1 is
+    # set here; is_amp_idx=2 for the AMP rows is filled in by
+    # attach_conditioning_features rather than set explicitly on this side,
+    # so a plain positives-only build (no --negatives) is unaffected.
+    if args.negatives:
+        negatives = pd.DataFrame({args.sequence_column: read_fasta(args.negatives)})
+        negatives[args.sequence_column] = negatives[args.sequence_column].apply(clean_sequence)
+        before = len(negatives)
+        negatives = negatives[negatives[args.sequence_column].apply(is_valid_sequence)]
+        negatives = negatives.drop_duplicates(subset=[args.sequence_column])
+        negatives["is_amp_idx"] = 1
+        print(
+            f"negatives: {len(negatives)} of {before} inside the 8-50 residue, "
+            f"standard-residue window, from {args.negatives}"
+        )
+        positives = pd.concat([positives, negatives], ignore_index=True, sort=False)
+
+    blocks = []
+    if args.sources:
+        spec = json.loads(Path(args.sources).read_text())
+        for entry in spec:
+            raw = read_table(entry["path"])
+            block = harmonize_activity(
+                raw,
+                column_map=entry["columns"],
+                endpoint=entry["endpoint"],
+                source=entry.get("source", Path(entry["path"]).stem),
+                default_unit=entry.get("default_unit"),
+                row_filters=entry.get("row_filters"),
+            )
+            print(
+                f"{entry['path']}: {len(block)} usable {entry['endpoint']} rows "
+                f"from {len(raw)} records"
+            )
+            blocks.append(block)
+
+    activity = (
+        pd.concat(blocks, ignore_index=True)
+        if blocks
+        else pd.DataFrame(columns=["sequence", "species", "strain", "endpoint",
+                                   "value_um", "censored", "source"])
+    )
+    activity.to_csv(output / "activity_harmonized.csv", index=False)
+
+    from ampx.data.ingest import build_metadata
+
+    metadata = build_metadata(positives, activity, sequence_column=args.sequence_column)
+
+    # Gram selectivity, per sequence: log10 of the geometric-mean MIC against
+    # gram-positive species over the geometric-mean MIC against gram-negative
+    # ones. Defined only for peptides measured against both classes, which is
+    # many more peptides than any single species pair supplies.
+    metadata["gram_selectivity_raw"] = gram_selectivity(
+        activity, metadata, sequence_column=args.sequence_column
+    )
+
+    metadata = attach_conditioning_features(metadata, sequence_column=args.sequence_column)
+
+    species_vocab = build_species_vocabulary(metadata, min_count=args.min_species_count)
+    (output / "species_vocab.json").write_text(json.dumps(species_vocab, indent=2))
+
+    metadata.to_csv(output / "metadata.csv", index=False)
+
+    print()
+    print(f"metadata rows        : {len(metadata)}")
+    print(f"unique sequences     : {metadata[args.sequence_column].nunique()}")
+    print(f"rows with MIC        : {int(metadata['log_mic'].notna().sum())}")
+    print(f"rows with HC50       : {int(metadata['log_hc50'].notna().sum())}")
+    print(f"rows with gram sel.  : {int(metadata['gram_selectivity'].notna().sum())}")
+    print(f"right-censored MIC   : {int((metadata['mic_censored_idx'] == 2).sum())}")
+    print(f"species in vocabulary: {len(species_vocab)}")
+    print(f"cys_class > 2 Cys    : {int((metadata['cys_class_idx'] == 3).sum())}")
+    print()
+    print(f"wrote {output / 'metadata.csv'}")
+    print(f"wrote {output / 'species_vocab.json'}")
+    print(f"wrote {output / 'activity_harmonized.csv'}")
 
 
 if __name__ == "__main__":
