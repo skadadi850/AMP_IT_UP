@@ -3,7 +3,7 @@
 #SBATCH -N 1
 #SBATCH -p ai
 #SBATCH -q normal
-#SBATCH -t 08:00:00
+#SBATCH -t 03:00:00
 #SBATCH --requeue
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-gpu=14
@@ -61,6 +61,19 @@ cd "$REPO"
 # here. Length distribution is directly scored in Phase 1, so a pad bias
 # carried over from the wrong checkpoint would skew all 50,000 sequences on a
 # scored axis.
+#
+# The grid is POSITIVE, which inverts calibrate_length.py's default. That
+# default (0.0 down to -3.0) encodes the face_only checkpoint's behaviour,
+# which was short-biased: median 16 against a training median of 18, so it
+# needed lengthening, and pad_bias is added to the PAD logit -- negative
+# suppresses PAD and lengthens. Stage-5b is the opposite. Job 16735793
+# measured it at median 21 / mean 22.98 at zero bias against a target of
+# 18 / 19.01, and KS rose monotonically across every negative value tested
+# (0.2153 at 0.0 up to 0.4397 at -0.75). The minimum sat on the grid
+# boundary, which is a truncation rather than a fit, so the optimum is at
+# positive bias. Linear extrapolation of that run puts it near +0.3; the grid
+# below brackets that and runs to +1.0 so the minimum is interior and can be
+# seen to be one.
 CKPT="$REPO/checkpoint/masked_diffusion_best.pt"
 META="$D/processed/selectivity/metadata.csv"
 SPLITS="$D/raw/splits_with_negatives.csv"
@@ -71,7 +84,7 @@ RUN_B="$REPO/run_b"
 echo "[cfg] REPO=$REPO D=$D"
 echo "[cfg] CKPT=$CKPT"
 echo "[cfg] META=$META SPLITS=$SPLITS"
-echo "[cfg] CALIBRATE_ONLY=$CALIBRATE_ONLY GRID=0.0 -0.1 -0.2 -0.3 -0.5 -0.75"
+echo "[cfg] CALIBRATE_ONLY=$CALIBRATE_ONLY GRID=0.0 +0.1 +0.2 +0.3 +0.4 +0.5 +0.75 +1.0"
 echo "[cfg] RUN_A=$RUN_A RUN_B=$RUN_B"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 
@@ -96,7 +109,7 @@ uv run python scripts/calibrate_length.py \
   --steps 128 \
   --reveal structured \
   --seed 7 \
-  --grid 0.0 -0.1 -0.2 -0.3 -0.5 -0.75 \
+  --grid 0.0 0.1 0.2 0.3 0.4 0.5 0.75 1.0 \
   --out "$OUTDIR/length_calibration_stage5b.csv" \
   --device cuda
 

@@ -1,0 +1,133 @@
+[cfg] REPO=/home/skadadi/Antimicrobial_Peptide_Project/AMP_IT_UP D=/home/skadadi/scratch/Antimicrobial_Peptide_Data
+[cfg] CKPT=/home/skadadi/Antimicrobial_Peptide_Project/AMP_IT_UP/checkpoint/masked_diffusion_best.pt
+[cfg] META=/home/skadadi/scratch/Antimicrobial_Peptide_Data/processed/selectivity/metadata.csv SPLITS=/home/skadadi/scratch/Antimicrobial_Peptide_Data/raw/splits_with_negatives.csv
+[cfg] CALIBRATE_ONLY=0 GRID=0.0 -0.1 -0.2 -0.3 -0.5 -0.75
+[cfg] RUN_A=/home/skadadi/Antimicrobial_Peptide_Project/AMP_IT_UP/run_a RUN_B=/home/skadadi/Antimicrobial_Peptide_Project/AMP_IT_UP/run_b
+NVIDIA H100 80GB HBM3, 81559 MiB
+
+== stage 0: sync the submission environment ==
+Using CPython 3.11.16
+Removed virtual environment at: .venv
+Creating virtual environment at: .venv
+Resolved 106 packages in 13ms
+warning: Failed to hardlink files; falling back to full copy. This may lead to degraded performance.
+         If the cache and target directories are on different filesystems, hardlinking may not be supported.
+         If this is intentional, set `export UV_LINK_MODE=copy` or use `--link-mode=copy` to suppress this warning.
+Installed 62 packages in 25.97s
+ + ampx==0.1.0 (from file:///home/skadadi/Antimicrobial_Peptide_Project/AMP_IT_UP)
+ + annotated-doc==0.0.5
+ + anyio==4.15.1
+ + certifi==2026.7.22
+ + click==8.5.0
+ + cuda-bindings==13.3.1
+ + cuda-pathfinder==1.7.0
+ + cuda-toolkit==13.0.2
+ + filelock==3.32.4
+ + fsspec==2026.7.0
+ + h11==0.16.0
+ + hf-xet==1.6.0
+ + httpcore==1.0.9
+ + httpx==0.28.1
+ + huggingface-hub==1.33.0
+ + idna==3.19
+ + jinja2==3.1.6
+ + levenshtein==0.27.4
+ + markdown-it-py==4.2.0
+ + markupsafe==3.0.3
+ + mdurl==0.1.2
+ + mpmath==1.3.0
+ + networkx==3.6.1
+ + numpy==2.4.6
+ + nvidia-cublas==13.1.0.3
+ + nvidia-cuda-cupti==13.0.85
+ + nvidia-cuda-nvrtc==13.0.88
+ + nvidia-cuda-runtime==13.0.96
+ + nvidia-cudnn-cu13==9.19.0.56
+ + nvidia-cufft==12.0.0.61
+ + nvidia-cufile==1.15.1.6
+ + nvidia-curand==10.4.0.35
+ + nvidia-cusolver==12.0.4.66
+ + nvidia-cusparse==12.6.3.3
+ + nvidia-cusparselt-cu13==0.8.0
+ + nvidia-nccl-cu12==2.31.2
+ + nvidia-nccl-cu13==2.28.9
+ + nvidia-nvjitlink==13.0.88
+ + nvidia-nvshmem-cu13==3.4.5
+ + nvidia-nvtx==13.0.85
+ + packaging==26.3
+ + pandas==3.0.5
+ + pygments==2.21.0
+ + python-dateutil==2.9.0.post0
+ + pyyaml==6.0.3
+ + rapidfuzz==3.14.5
+ + regex==2026.9.10
+ + rich==15.0.0
+ + safetensors==0.8.0
+ + scipy==1.17.1
+ + setuptools==81.0.0
+ + shellingham==1.5.4
+ + six==1.17.0
+ + sympy==1.14.0
+ + tokenizers==0.23.2
+ + torch==2.11.0
+ + tqdm==4.70.0
+ + transformers==5.17.0
+ + triton==3.6.0
+ + typer==0.27.2
+ + typing-extensions==4.16.0
+ + xgboost==3.2.0
+masked_diffusion_best.pt: ok
+mic_regressor.json: ok
+mic_regressor_meta.json: ok
+species_vocab.json: ok
+length_calibration.json: ok
+
+== stage 1: pad-bias calibration grid (stage-5b checkpoint) ==
+/home/skadadi/Antimicrobial_Peptide_Project/AMP_IT_UP/scripts/calibrate_length.py:51: DtypeWarning: Columns (0: species, 1: mic_censored) have mixed types. Specify dtype option on import or set low_memory=False.
+  meta = pd.read_csv(args.metadata)
+calibration reference: 48085 training-fold sequences, median 18, mean 19.01
+  pad_bias +0.00  median  21.0  mean 22.98  in-scope 100.0%  ks_length 0.2153
+  pad_bias -0.10  median  22.0  mean 23.76  in-scope 100.0%  ks_length 0.2505
+  pad_bias -0.20  median  23.0  mean 24.47  in-scope 100.0%  ks_length 0.2773
+  pad_bias -0.30  median  24.0  mean 25.26  in-scope 100.0%  ks_length 0.3121
+  pad_bias -0.50  median  25.0  mean 26.71  in-scope 100.0%  ks_length 0.3684
+  pad_bias -0.75  median  28.0  mean 28.71  in-scope 100.0%  ks_length 0.4397
+
+best pad_bias = +0.00 (ks_length 0.2153, median 21.0)
+wrote /home/skadadi/Antimicrobial_Peptide_Project/AMP_IT_UP/results/calibration/length_calibration_stage5b.csv and /home/skadadi/Antimicrobial_Peptide_Project/AMP_IT_UP/results/calibration/length_calibration_stage5b.json
+
+=== pad-bias grid (stage-5b) ===
+ pad_bias    n  n_in_scope  pct_in_scope  median_length  mean_length  ks_length_vs_train
+     0.00 4000        3998        99.950           21.0    22.978489            0.215279
+    -0.10 4000        3998        99.950           22.0    23.756628            0.250547
+    -0.20 4000        3998        99.950           23.0    24.473987            0.277310
+    -0.30 4000        3998        99.950           24.0    25.257879            0.312078
+    -0.50 4000        3998        99.950           25.0    26.711106            0.368356
+    -0.75 4000        3999        99.975           28.0    28.708927            0.439712
+
+fitted pad_bias = +0.00 (KS 0.2153)
+old face_only value was -0.20; agreement here is confirmation, disagreement means the carried-over value would have skewed length.
+wrote checkpoint/length_calibration_stage5b.json
+
+== stage 2: generation run A ==
+device  : cuda
+masked_diffusion_best.pt: ok
+mic_regressor.json: ok
+mic_regressor_meta.json: ok
+species_vocab.json: ok
+length_calibration.json: ok
+Loading weights:   0%|          | 0/198 [00:00<?, ?it/s]Loading weights:   8%|▊         | 16/198 [00:00<00:02, 84.39it/s]Loading weights: 100%|██████████| 198/198 [00:00<00:00, 1015.60it/s]
+[transformers] [1mEsmModel LOAD REPORT[0m from: facebook/esm2_t12_35M_UR50D
+Key                       | Status     |  | 
+--------------------------+------------+--+-
+lm_head.dense.weight      | UNEXPECTED |  | 
+lm_head.layer_norm.weight | UNEXPECTED |  | 
+lm_head.dense.bias        | UNEXPECTED |  | 
+lm_head.layer_norm.bias   | UNEXPECTED |  | 
+lm_head.bias              | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+length  : pad_bias +0.00, reveal structured (from length_calibration_stage5b.json)
+oracle  : 1065 trees, esm=facebook/esm2_t12_35M_UR50D
+sampling:   0%|          | 0/157 [00:00<?, ?it/s]sampling:   1%|          | 1/157 [00:14<37:06, 14.27s/it]sampling:   1%|▏         | 2/157 [00:28<36:24, 14.09s/it]sampling:   2%|▏         | 3/157 [00:42<36:01, 14.03s/it]sampling:   3%|▎         | 4/157 [00:56<35:43, 14.01s/it]sampling:   3%|▎         | 5/157 [01:10<35:27, 13.99s/it]sampling:   4%|▍         | 6/157 [01:24<35:12, 13.99s/it]sampling:   4%|▍         | 7/157 [01:38<34:57, 13.98s/it]sampling:   5%|▌         | 8/157 [01:52<34:43, 13.98s/it]sampling:   6%|▌         | 9/157 [02:06<34:28, 13.98s/it]sampling:   6%|▋         | 10/157 [02:20<34:14, 13.98s/it]sampling:   7%|▋         | 11/157 [02:33<34:00, 13.98s/it]sampling:   8%|▊         | 12/157 [02:47<33:46, 13.97s/it]sampling:   8%|▊         | 13/157 [03:01<33:32, 13.98s/it]sampling:   9%|▉         | 14/157 [03:15<33:18, 13.98s/it]sampling:  10%|▉         | 15/157 [03:29<33:04, 13.97s/it]sampling:  10%|█         | 16/157 [03:43<32:50, 13.97s/it]sampling:  11%|█         | 17/157 [03:57<32:36, 13.97s/it]sampling:  11%|█▏        | 18/157 [04:11<32:21, 13.97s/it]sampling:  12%|█▏        | 19/157 [04:25<32:07, 13.97s/it]sampling:  13%|█▎        | 20/157 [04:39<31:53, 13.97s/it]sampling:  13%|█▎        | 21/157 [04:53<31:39, 13.97s/it]sampling:  14%|█▍        | 22/157 [05:07<31:25, 13.97s/it]sampling:  15%|█▍        | 23/157 [05:21<31:11, 13.97s/it]sampling:  15%|█▌        | 24/157 [05:35<30:57, 13.97s/it]sampling:  16%|█▌        | 25/157 [05:49<30:43, 13.97s/it]sampling:  17%|█▋        | 26/157 [06:03<30:29, 13.97s/it]sampling:  17%|█▋        | 27/157 [06:17<30:15, 13.96s/it]sampling:  18%|█▊        | 28/157 [06:31<30:01, 13.96s/it]sampling:  18%|█▊        | 29/157 [06:45<29:47, 13.96s/it]sampling:  19%|█▉        | 30/157 [06:59<29:33, 13.96s/it]sampling:  20%|█▉        | 31/157 [07:13<29:19, 13.96s/it]sampling:  20%|██        | 32/157 [07:27<29:05, 13.96s/it]sampling:  21%|██        | 33/157 [07:41<28:51, 13.96s/it]sampling:  22%|██▏       | 34/157 [07:55<28:37, 13.96s/it]sampling:  22%|██▏       | 35/157 [08:09<28:23, 13.96s/it]sampling:  23%|██▎       | 36/157 [08:23<28:08, 13.96s/it]sampling:  24%|██▎       | 37/157 [08:37<27:55, 13.96s/it][2026-09-28T00:30:44.208] error: *** JOB 16735793 ON h007 CANCELLED AT 2026-09-28T00:30:44 DUE to SIGNAL Terminated ***
