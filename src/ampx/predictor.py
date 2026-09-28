@@ -89,8 +89,25 @@ class Oracle:
     def __init__(self, model_path, meta_path, device: str | None = None):
         import xgboost as xgb
         self.meta = json.loads(Path(meta_path).read_text())
-        self.model = xgb.XGBRegressor()
+        # A raw Booster rather than XGBRegressor: the sklearn wrapper imports
+        # scikit-learn at construction, which inference would otherwise have to
+        # ship for no other reason.
+        self.model = xgb.Booster()
         self.model.load_model(model_path)
+
+        # How many trees to predict with, fixed here instead of left to the
+        # library default. This checkpoint holds 1807 trees but was early-
+        # stopped at best_iteration=1706, so the 101 trees after that point are
+        # past the selection criterion. xgboost 3.2.0's default `predict`
+        # truncates at best_iteration + 1 = 1707 and that is the behaviour the
+        # recorded holdout Spearman was measured under, but the default has
+        # changed across releases. Naming the number makes the prediction a
+        # property of the checkpoint rather than of whichever xgboost is
+        # installed.
+        self.n_trees = int(
+            self.meta.get("predict_n_trees")
+            or (self.model.best_iteration + 1)
+        )
         self.encoder = None
         if self.meta["uses_embeddings"]:
             # The embedding block must come from the same ESM-2 the regressor
@@ -125,4 +142,7 @@ class Oracle:
             embeddings = self.encoder.encode(frame["sequence"].tolist(), batch_size=256)
             frame["row"] = np.arange(len(frame))
         features, _ = build_features(frame, embeddings, self.meta["species_levels"])
-        return self.model.predict(features)
+        import xgboost as xgb
+        return self.model.predict(
+            xgb.DMatrix(features), iteration_range=(0, self.n_trees)
+        )

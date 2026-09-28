@@ -29,6 +29,8 @@
   ],
   "uses_embeddings": true,
   "embedding_dim": 480,
+  "esm_model": "facebook/esm2_t12_35M_UR50D",
+  "predict_n_trees": 1707,
   "holdout_spearman": 0.6182793237849927,
   "holdout_mae": 0.4426739811897278
 }

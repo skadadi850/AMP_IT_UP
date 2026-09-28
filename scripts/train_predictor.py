@@ -16,20 +16,17 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from scipy import stats
 
-REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO / "src"))
-
 # Shared with inference so the feature matrix is assembled identically on both
-# sides -- see the module docstring in ampx/predictor.py.
-from ampx.models.encoder import DEFAULT_ESM_MODEL  # noqa: E402
-from ampx.predictor import DESCRIPTORS, build_features  # noqa: E402
+# sides -- see the module docstring in ampx/predictor.py. ampx is an installed
+# package, so this resolves without a sys.path prelude.
+from ampx.models.encoder import DEFAULT_ESM_MODEL
+from ampx.predictor import DESCRIPTORS, build_features
 
 MIN_SPEARMAN = 0.4
 # Above this share of rows missing from the cluster table, the singleton

@@ -64,6 +64,53 @@ is read rather than merely how fast it runs:
   meaning.
 - **`torch==2.11.0`** — trained `checkpoints/masked_diffusion_best.pt`.
 
+### Encoder identity, recovered after the fact
+
+`checkpoints/mic_regressor_meta.json` now carries
+`"esm_model": "facebook/esm2_t12_35M_UR50D"`. This key was **not written at
+training time** — the training script recorded only `uses_embeddings` and
+`embedding_dim`. It was recovered from the training job's own log line
+(`scripts/hpc/32_mic_regressor.sbatch`, which echoes
+`ESM=facebook/esm2_t12_35M_UR50D`) and added to the metadata by hand rather
+than by retraining. Two independent facts corroborate it: that model's hidden
+size is 480, and the regressor's 510 input features decompose exactly as
+9 descriptors + 16 species indicators + 5 Gram indicators + 480 embedding
+dimensions.
+
+Training and inference reach those embeddings by different routes but the same
+model and the same pooling path. The training run consumed a precomputed array
+(`mic_esm.npy`, written by `scripts/embed_sequences.py`), whereas `Oracle`
+encodes sequences on the fly through `ampx.models.encoder.ESM2Encoder`. Both
+take the mask-weighted mean over `last_hidden_state` of
+`esm2_t12_35M_UR50D`, over real tokens only. The encoder never uses the
+`pooler.dense` layer, which Hugging Face reports as newly initialized when
+loading these weights; it is constructed but does not contribute to any value
+we use.
+
+### Tree count at prediction time
+
+`Oracle` predicts with an explicit `iteration_range=(0, 1707)`, taken from
+`predict_n_trees` in the checkpoint metadata, instead of relying on the
+library default.
+
+The checkpoint holds 1,807 trees but was early-stopped at
+`best_iteration=1706`, so 101 trees sit past the point the model was selected
+at. Scoring the 5,691 held-out rows preserved in the training run's own
+`mic_holdout_predictions.csv` separates the possibilities:
+
+| Variant | Held-out Spearman | Max abs. difference from recorded predictions |
+|---|---|---|
+| library default | 0.6182701214 | 1.1e-07 |
+| `iteration_range=(0, 1707)` | 0.6182701214 | 1.1e-07 |
+| `iteration_range=(0, 1807)` | 0.6181457518 | 7.4e-02 |
+
+Under xgboost 3.2.0 the default is bit-identical to `(0, 1707)` and
+reproduces the recorded predictions to float32 rounding, against a recorded
+`holdout_spearman` of 0.6182793238 and `holdout_mae` of 0.4426739812. Using
+all 1,807 trees does not reproduce them. The checkpoint was therefore selected
+under 1,707 trees, and that number is now named explicitly so a future xgboost
+whose default differs cannot silently reorder our predictions.
+
 ## Generative model
 
 - Architecture:
