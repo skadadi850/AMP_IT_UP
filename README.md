@@ -50,12 +50,11 @@ src/ampx/
   generate.py      entry point; deterministic sampling + ranking
   compliance.py    hard-constraint gate (alphabet, length, novelty ceiling)
   ranking.py       risk-aware top-100 selection
-  featurize.py     descriptor computation for the surrogate ensemble
   predictor.py     calibrated activity / MIC surrogates
   models/          generator architectures
 scripts/           dataset build, training, evaluation
-checkpoint/       trained weights (git-lfs)
-data/    organizers' exclusion set
+checkpoint/        trained weights, fetched from the tagged release
+data/              organizers' exclusion set (antibacterial.fasta)
 docs/METHOD.md     method abstract + data disclosure
 ```
 
