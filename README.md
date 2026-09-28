@@ -1,4 +1,4 @@
-# CMD_AMP -- AMP Challenge 2027 submission
+# CMD_AMP
 
 This repo contains our implementation of Conditioned Masked Discrete Diffusion for Antimicrobial Peptide Design (AMP Challenge - NeurIPS 2026 Competition Track).
 
