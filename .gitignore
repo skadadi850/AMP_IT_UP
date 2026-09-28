@@ -21,3 +21,11 @@ handoff.md
 logs/
 run_a/
 run_b/
+
+# Harmonized activity table: rebuilt, not redistributed. It aggregates sources
+# with differing and in places unconfirmed redistribution terms, including
+# GPL-3.0 HemoPI-2 data, which cannot ship under this repository's MIT licence.
+# data/processed/README.md carries the rebuild command, the upstream sources
+# with retrieval dates, the expected row counts and a checksum of the table the
+# shipped models were trained on.
+data/processed/activity_harmonized.csv

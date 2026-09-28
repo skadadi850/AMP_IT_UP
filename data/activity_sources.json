@@ -1,0 +1,38 @@
+[
+  {
+    "path": "data/raw/grampa.csv",
+    "endpoint": "mic",
+    "source": "grampa",
+    "default_unit": "log10_um",
+    "row_filters": {
+      "datasource_has_modifications": true,
+      "has_unusual_modification": false
+    },
+    "columns": {
+      "sequence": "sequence",
+      "value": "value",
+      "species": "bacterium",
+      "strain": "strain"
+    }
+  },
+  {
+    "path": "data/raw/hemopi2_measured.csv",
+    "endpoint": "hc50",
+    "source": "hemopi2_measured",
+    "default_unit": "um",
+    "columns": {
+      "sequence": "SEQUENCE",
+      "value": "HC50"
+    }
+  },
+  {
+    "path": "data/raw/hemopi2_predicted.csv",
+    "endpoint": "hc50",
+    "source": "hemopi2_predicted",
+    "default_unit": "um",
+    "columns": {
+      "sequence": "SEQUENCE",
+      "value": "HC50"
+    }
+  }
+]

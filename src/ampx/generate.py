@@ -384,11 +384,30 @@ def generate_library(
     calibration: dict,
     device: str,
     request: dict | None = None,
+    max_length: int = MAX_PEPTIDE_LENGTH,
 ) -> list[str]:
     """Sample until `n_sequences` unique, compliant, novel sequences exist."""
     request = dict(request or {})
     reference_exact = set(references)
-    reference_lengths = [len(s) for s in references]
+
+    # Lengths are drawn from the reference distribution, so capping the
+    # requested length means capping that distribution at the source rather
+    # than filtering afterwards: a post-hoc filter would leave the shortfall
+    # unfilled and quietly shrink the library. At the default of
+    # MAX_PEPTIDE_LENGTH this is a no-op, since the reference set is already
+    # bounded at 50, and generation is byte-identical to not passing it.
+    max_length = min(int(max_length), MAX_PEPTIDE_LENGTH)
+    if max_length < MIN_PEPTIDE_LENGTH:
+        raise SystemExit(
+            f"--length {max_length} is below the {MIN_PEPTIDE_LENGTH}-residue "
+            "competition floor"
+        )
+    reference_lengths = [len(s) for s in references if len(s) <= max_length]
+    if not reference_lengths:
+        raise SystemExit(
+            f"--length {max_length} leaves no reference sequences to draw a "
+            "length distribution from"
+        )
 
     # The calibration ships `reveal`/`best_pad_bias` fitted by
     # scripts/calibrate_length.py. pad_bias is only meaningful with
@@ -618,6 +637,10 @@ def main() -> None:
     parser.add_argument("--n-sequences", type=int, default=LIBRARY_SIZE)
     parser.add_argument("--top-k", type=int, default=TOP_SIZE)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    parser.add_argument(
+        "--length", type=int, default=MAX_PEPTIDE_LENGTH,
+        help="maximum peptide length, in residues (template flag; the "
+             "competition ceiling and the default are both 50)")
     parser.add_argument("--device", default=None,
                         help="'cuda', 'cpu', or omitted to resolve automatically.")
     parser.add_argument("--kappa", type=float, default=1.5,
@@ -654,7 +677,7 @@ def main() -> None:
 
     library = generate_library(
         args.n_sequences, args.seed, model, species_vocab, novelty,
-        references, calibration, device,
+        references, calibration, device, max_length=args.length,
     )
     library_path = out_dir / "library.fasta"
     write_fasta(library, library_path)

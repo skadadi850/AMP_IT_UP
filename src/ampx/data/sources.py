@@ -42,9 +42,9 @@ class Source:
     #: Default role for records from this source.
     role: str
     #: License string, e.g. 'CC BY 4.0'. Required for disclosure.
-    license: str = "TODO"
+    license: str = "terms not confirmed"
     #: Version or access date, e.g. '2026-08-25'. Required for disclosure.
-    accessed: str = "TODO"
+    accessed: str = "not retrieved"
     #: Where you got it, for the provenance table.
     url: str = ""
     #: Glob for the files inside data/raw/<id>/. Default: everything.
@@ -85,11 +85,18 @@ SOURCES: list[Source] = [
         kind="fasta",
         role="positive",
         license="CC0",
+        accessed="2026-09-12",
         url="https://doi.org/10.17632/w4hb5grjwb.3",
-        notes="Aggregates ~102k sequences from 13 primary AMP databases. "
-              "The organizers' 80% identity ceiling is defined against this set, "
-              "so it is simultaneously your best positive set and your novelty "
-              "constraint. See PLAN.md 4.1.",
+        notes="USED BY THE SHIPPED MODELS. Aggregates ~102k sequences from 13 "
+              "primary AMP databases. The positive class in BOTH generator "
+              "stages: 39,448 rows at label==1, plus 723 at label==0 tiered "
+              "non_amp_function which are excluded from the positive class. "
+              "The organizers' 80% identity ceiling is defined against this "
+              "set -- the 39,448 are byte-for-byte identical to "
+              "data/antibacterial.fasta -- so the generator was trained on the "
+              "set its output must stay 80% distant from. That decision is "
+              "declared in docs/METHOD.md rather than left to be inferred. "
+              "See PLAN.md 4.1.",
     ),
     Source(
         id="dbaasp",
@@ -112,7 +119,7 @@ SOURCES: list[Source] = [
         name="DRAMP 3.0",
         kind="table",
         role="positive",
-        license="TODO: verify academic terms",
+        license="terms not confirmed; surveyed, not used by the shipped models",
         url="http://dramp.cpu-bioinfor.org/downloads/",
         seq_col="Sequence",
         id_col="DRAMP_ID",
@@ -160,9 +167,94 @@ SOURCES: list[Source] = [
         name="AMPlify non-AMP set",
         kind="fasta",
         role="negative",
-        license="TODO: verify",
+        license="terms not confirmed; surveyed, not used by the shipped models",
         url="https://github.com/bcgsc/AMPlify",
         notes="~128k curated non-AMPs. Real negatives, distinct from 'general'.",
+    ),
+
+    # ------------------------------------------------------------------
+    # Sources actually used by the shipped models.
+    #
+    # The entries above describe databases surveyed during dataset design.
+    # The five below are the ones that supply every label the submitted
+    # library depends on, and they are recorded separately because that
+    # distinction was not obvious from this file before: a reader could
+    # reasonably have concluded that DBAASP or Peptipedia were trained on
+    # directly, which they were not.
+    #
+    # Where terms could not be confirmed the field says so explicitly.
+    # "terms not confirmed" is a statement of fact about what was checked;
+    # a blank or an optimistic guess would not be.
+    # ------------------------------------------------------------------
+    Source(
+        id="grampa",
+        name="GRAMPA (Giant Repository of AMP Activities)",
+        kind="table",
+        role="positive",
+        license="aggregation; constituent terms differ, see notes",
+        accessed="2026-09-12",
+        url="https://github.com/zswitten/Antimicrobial-Peptides",
+        seq_col="sequence",
+        notes="Supplies 100% of the MIC labels: 39,117 rows over 5,602 unique "
+              "peptides and 659 species. An AGGREGATION, and its constituents "
+              "do not share terms. Of the 41,500 rows surviving the ingest "
+              "filter: DBAASP 32,880 (CC BY 4.0), DRAMP 4,459 (TERMS NOT "
+              "CONFIRMED), APD 3,554 (TERMS NOT CONFIRMED), DADP 607 (TERMS "
+              "NOT CONFIRMED). This unresolved mix is why the harmonized "
+              "activity table is rebuilt rather than redistributed; see "
+              "data/processed/README.md. Ingest keeps modified peptides "
+              "(datasource_has_modifications=true) while excluding unusual "
+              "modifications, so 37.4% of the MIC rows are C-terminally "
+              "amidated -- a disclosed bias relative to our free-termini "
+              "linear designs, see docs/METHOD.md.",
+    ),
+    Source(
+        id="hemopi2",
+        name="HemoPI-2 (Rathore et al., Commun Biol 8:176, 2025)",
+        kind="table",
+        role="general",
+        license="GPL-3.0 -- NOT redistributable under this repository's MIT",
+        accessed="2026-09-12",
+        url="https://doi.org/10.5281/zenodo.14676712",
+        seq_col="SEQUENCE",
+        notes="Two distinct uses, with different licence consequences. "
+              "(1) MEASURED HC50: 1,908 rows taken from the repository's own "
+              "Dataset/ files (1,524 from cross_val_dataset.csv, 380 from "
+              "independent_dataset.csv). This is their data under GPL-3.0 and "
+              "is NOT committed here. (2) PREDICTED HC50: 39,448 values we "
+              "generated by running their hemopi2_regression.py over the MLAMP "
+              "positives. Program output is not covered by the program's "
+              "licence. Their lenchk() truncates sequences over 40 residues "
+              "before featurization, so 1,367 of those predictions (3.47%) are "
+              "computed on a truncated peptide. Repo HEAD 2b67a5c, 2026-07-13.",
+    ),
+    Source(
+        id="sorfdb",
+        name="sORFdb (Zenodo record 10688271)",
+        kind="fasta",
+        role="general",
+        license="see Zenodo record; terms not confirmed",
+        accessed="2026-08-30",
+        url="https://doi.org/10.5281/zenodo.10688271",
+        notes="With SmProt v2, supplies the 269,824 general small proteins "
+              "that form the generator pretrain's negative class. Real "
+              "translated open reading frames, NOT shuffled or mutated "
+              "decoys. All five files MD5-verified against the Zenodo record; "
+              "protein FASTA holds 34,007,166 records before filtering to "
+              "8-50 residues. Role is 'general', not 'negative': absence from "
+              "an AMP database is not evidence of inactivity.",
+    ),
+    Source(
+        id="smprot_v2",
+        name="SmProt v2",
+        kind="fasta",
+        role="general",
+        license="terms not confirmed",
+        accessed="2026-08-30",
+        url="http://bigdata.ibp.ac.cn/SmProt/",
+        notes="Pooled with sORFdb into the pretrain general-peptide class. "
+              "832,959 FASTA records across evidence-specific files before "
+              "deduplication.",
     ),
 ]
 
