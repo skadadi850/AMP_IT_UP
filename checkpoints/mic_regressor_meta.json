@@ -28,9 +28,10 @@
     "cys_class_idx"
   ],
   "uses_embeddings": true,
-  "embedding_dim": 480,
   "esm_model": "facebook/esm2_t12_35M_UR50D",
-  "predict_n_trees": 1707,
-  "holdout_spearman": 0.6182793237849927,
-  "holdout_mae": 0.4426739811897278
+  "embedding_dim": 480,
+  "predict_n_trees": 1065,
+  "split": "cluster-disjoint, MMseqs2 40% identity, 2824 clusters, 0 singletons",
+  "holdout_spearman": 0.5330633633320551,
+  "holdout_mae": 0.5086243152618408
 }

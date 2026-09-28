@@ -87,29 +87,74 @@ take the mask-weighted mean over `last_hidden_state` of
 loading these weights; it is constructed but does not contribute to any value
 we use.
 
+### A leaking split, caught and corrected
+
+The regressor shipped here was retrained on 2026-09-27. The history matters
+and is recorded rather than smoothed over.
+
+The original run of 2026-09-13 intended a cluster-disjoint split: hold out
+whole MMseqs2 clusters at 40% identity, so no held-out peptide has a close
+relative in training. It did not get one. The sequence-to-cluster mapping
+matched nothing, every sequence fell through to the singleton fallback, and
+all 5,602 sequences became their own cluster. Holding out 20% of "clusters"
+was then identical to holding out 20% of sequences, and because near-identical
+peptides recur across AMP databases, relatives straddled the split freely.
+
+The defect is visible in that run's own output: every one of the 5,691
+held-out rows in its `mic_holdout_predictions.csv` carries a `cluster` value
+equal to its own sequence. It was diagnosed and guarded on 2026-09-21, by a
+check that refuses to run when more than a small fraction of rows are missing
+from the cluster table — the singleton fallback is a safety net for
+stragglers, not a mode of operation. That guard would now stop the Sep 13
+configuration outright.
+
+The two runs differ only in the split. Same cached ESM-2 embeddings, same
+hyperparameters, same seed, same holdout fraction:
+
+| Run | Split actually used | Clusters | Held-out Spearman | MAE |
+|---|---|---|---|---|
+| 2026-09-13 | degenerate: 5,602 singletons, effectively random by sequence | 5,602 | 0.6183 | 0.4427 |
+| 2026-09-27 (**shipped**) | cluster-disjoint, MMseqs2 40% identity | 2,824 | **0.5331** | 0.5086 |
+
+The drop from 0.618 to 0.533 is the correction, not a regression: roughly
+0.085 of Spearman in the original figure was identity leakage rather than
+predictive skill. The corrected model clears the preregistered gate of 0.4,
+and its label-shuffled leakage control reads 0.0314, far below the 0.15 ceiling.
+
+The superseded model is kept at `checkpoints/mic_regressor_leaky_split.json`
+with its own metadata, so the comparison can be re-run rather than taken on
+trust. It is not loaded by anything.
+
 ### Tree count at prediction time
 
-`Oracle` predicts with an explicit `iteration_range=(0, 1707)`, taken from
-`predict_n_trees` in the checkpoint metadata, instead of relying on the
-library default.
+`Oracle` predicts with an explicit `iteration_range=(0, 1065)`, read from
+`predict_n_trees` in the checkpoint metadata, instead of relying on any
+library default. The shipped model holds 1,165 trees and was early-stopped at
+`best_iteration=1064`, so 100 trees sit past the point it was selected at.
 
-The checkpoint holds 1,807 trees but was early-stopped at
-`best_iteration=1706`, so 101 trees sit past the point the model was selected
-at. Scoring the 5,691 held-out rows preserved in the training run's own
-`mic_holdout_predictions.csv` separates the possibilities:
+This is load-bearing because the two XGBoost prediction APIs disagree, and we
+changed which one we use. Verified on both checkpoints under xgboost 3.2.0:
+
+| API | Default behaviour |
+|---|---|
+| `XGBRegressor.predict` (used during training) | truncates at `best_iteration + 1` |
+| `Booster.predict` (used by `Oracle`) | uses **every** tree |
+
+`Oracle` was switched from `XGBRegressor` to a raw `Booster` so that inference
+need not ship scikit-learn. Without an explicit `iteration_range` that switch
+would silently have started scoring with all 1,165 trees — predictions the
+model was never selected under. Scoring the shipped model's own 5,751 held-out
+rows:
 
 | Variant | Held-out Spearman | Max abs. difference from recorded predictions |
 |---|---|---|
-| library default | 0.6182701214 | 1.1e-07 |
-| `iteration_range=(0, 1707)` | 0.6182701214 | 1.1e-07 |
-| `iteration_range=(0, 1807)` | 0.6181457518 | 7.4e-02 |
+| `Booster.predict()` default (all 1,165) | 0.5337120793 | 7.2e-02 |
+| `iteration_range=(0, 1065)` | 0.5330712034 | 1.1e-07 |
 
-Under xgboost 3.2.0 the default is bit-identical to `(0, 1707)` and
-reproduces the recorded predictions to float32 rounding, against a recorded
-`holdout_spearman` of 0.6182793238 and `holdout_mae` of 0.4426739812. Using
-all 1,807 trees does not reproduce them. The checkpoint was therefore selected
-under 1,707 trees, and that number is now named explicitly so a future xgboost
-whose default differs cannot silently reorder our predictions.
+Only `(0, 1065)` reproduces the recorded predictions, to float32 rounding,
+against the recorded `holdout_spearman` of 0.5330633633. The number is stored
+with the checkpoint, so it travels with the artifact it describes rather than
+being a constant in the code.
 
 ## Generative model
 

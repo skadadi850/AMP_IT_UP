@@ -96,6 +96,47 @@ def _uv_run(
         ) from e
 
 
+#: Constructs the Oracle and scores one sequence. Importing `ampx.predictor`
+#: proves far less than it looks: it does not build an XGBoost model, does not
+#: load ESM-2, and does not touch the checkpoint metadata, so a missing
+#: inference dependency stays invisible until generation is already running.
+#: This is what caught scikit-learn being absent from `dependencies` while
+#: `Oracle` still constructed an `xgb.XGBRegressor`.
+_ORACLE_SMOKE = """
+from ampx.predictor import Oracle
+oracle = Oracle(
+    "checkpoints/mic_regressor.json",
+    "checkpoints/mic_regressor_meta.json",
+    device="cpu",
+)
+assert oracle.n_trees > 0, "no tree count resolved"
+scores = oracle.predict(["GIGKFLHSAKKFGKAFVGEIMNS"], ["escherichia coli"])
+assert scores.shape == (1,), f"expected one score, got {scores.shape}"
+assert scores[0] == scores[0], "prediction is NaN"
+print(f"oracle ok: n_trees={oracle.n_trees} "
+      f"esm={oracle.meta.get('esm_model')} score={scores[0]:.4f}")
+"""
+
+
+def _smoke_oracle(repo_dir: Path, uv: str = "uv") -> None:
+    """Build the predictor for real and score one peptide."""
+    env = {k: v for k, v in os.environ.items() if k != "VIRTUAL_ENV"}
+    try:
+        subprocess.run(
+            [uv, "run", "--no-sync", "python", "-c", _ORACLE_SMOKE],
+            check=True,
+            cwd=repo_dir,
+            env=env,
+        )
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            "Oracle smoke test failed: the predictor could not be constructed "
+            "or could not score a sequence in the synced environment "
+            f"(exit code {e.returncode}). A dependency reachable only at "
+            "prediction time is the usual cause."
+        ) from e
+
+
 def _verify_sequences(fasta_path: Path) -> set[str]:
     headers, sequences = _read_fasta(fasta_path)
     errors: list[str] = []
@@ -195,27 +236,30 @@ def verify_setup(
     library_fasta = dir / ENTRY_POINT / "library.fasta"
     top_fasta = dir / ENTRY_POINT / "top.fasta"
 
-    print("[3] Generating library")
+    print("[3] Constructing the predictor")
+    _smoke_oracle(dir)
+
+    print("[4] Generating library")
     _uv_run(dir)
 
-    print("[4] Verifying full library")
+    print("[5] Verifying full library")
     full_sequences = _verify_sequences(library_fasta)
 
-    print("[5] Verifying top list")
+    print("[6] Verifying top list")
     _verify_top(top_fasta, full_sequences, TOP_SIZE)
 
     if antibacterial_fasta is not None:
         _, antibacterial_sequences = _read_fasta(antibacterial_fasta)
         antibacterial_set = set(antibacterial_sequences)
 
-        print(f"[6] Checking library overlap with {antibacterial_fasta}")
+        print(f"[7] Checking library overlap with {antibacterial_fasta}")
         _verify_no_overlap(full_sequences, antibacterial_set)
 
-        print(f"[7] Checking top similarity with {antibacterial_fasta}")
+        print(f"[8] Checking top similarity with {antibacterial_fasta}")
         _, top_sequences = _read_fasta(top_fasta)
         _veritfy_max_simularity(set(top_sequences), antibacterial_set)
 
-    print("[8] Checking reproducibility" if antibacterial_fasta is not None else "[6] Checking reproducibility")
+    print("[9] Checking reproducibility" if antibacterial_fasta is not None else "[7] Checking reproducibility")
     library_data = library_fasta.read_bytes()
     top_data = top_fasta.read_bytes()
     _uv_run(dir)
