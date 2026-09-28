@@ -13,14 +13,14 @@ authors = [{ name = "YOUR NAME", email = "you@your-institution.edu" }]
 #
 # torch, transformers and xgboost are pinned exactly rather than floored,
 # because each one decides how a shipped checkpoint is interpreted:
-#   * xgboost 3.2.0 is the version that wrote checkpoints/mic_regressor.json
+#   * xgboost 3.2.0 is the version that wrote checkpoint/mic_regressor.json
 #     (recorded in its own `version` field). That model carries 1807 trees
 #     with best_iteration=1706, so 101 trees sit past the early-stopping
 #     point and whether a reader truncates there or predicts with all of
 #     them changes every MIC estimate, and with it the top 100.
 #   * transformers 5.17.0 produced the 480-d ESM-2 embedding block that the
 #     regressor's 510 input features are built on.
-#   * torch 2.11.0 trained checkpoints/masked_diffusion_best.pt.
+#   * torch 2.11.0 trained checkpoint/masked_diffusion_best.pt.
 dependencies = [
     "numpy>=1.26",
     "levenshtein>=0.27",

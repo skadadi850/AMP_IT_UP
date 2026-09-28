@@ -105,8 +105,8 @@ def _uv_run(
 _ORACLE_SMOKE = """
 from ampx.predictor import Oracle
 oracle = Oracle(
-    "checkpoints/mic_regressor.json",
-    "checkpoints/mic_regressor_meta.json",
+    "checkpoint/mic_regressor.json",
+    "checkpoint/mic_regressor_meta.json",
     device="cpu",
 )
 assert oracle.n_trees > 0, "no tree count resolved"

@@ -3,15 +3,15 @@ Sample from the masked discrete diffusion model.
 
 Usage:
     python scripts/generate_masked.py \
-        --model checkpoints/masked_diffusion_best.pt \
-        --species-vocab checkpoints/species_vocab.json \
+        --model checkpoint/masked_diffusion_best.pt \
+        --species-vocab checkpoint/species_vocab.json \
         --sweep --num-samples 1000
 
     python scripts/generate_masked.py \
-        --model checkpoints/masked_diffusion_best.pt \
-        --species-vocab checkpoints/species_vocab.json \
+        --model checkpoint/masked_diffusion_best.pt \
+        --species-vocab checkpoint/species_vocab.json \
         --request request.json \
-        --reference data/reference/antibacterial.fasta \
+        --reference data/antibacterial.fasta \
         --num-samples 50000 \
         --guidance-weight 2.0 --steps 128 \
         --output results/candidates/library.csv
@@ -137,12 +137,12 @@ def run_sweep(model, request, species_vocab, args) -> pd.DataFrame:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    # Both default to the checkpoint pair shipped in checkpoints/. They belong
+    # Both default to the checkpoint pair shipped in checkpoint/. They belong
     # together: the vocab fixes the species index the condition encoder was
     # trained against, so a vocab from a different corpus silently shifts every
     # species id.
-    parser.add_argument("--model", default="checkpoints/masked_diffusion_best.pt")
-    parser.add_argument("--species-vocab", default="checkpoints/species_vocab.json")
+    parser.add_argument("--model", default="checkpoint/masked_diffusion_best.pt")
+    parser.add_argument("--species-vocab", default="checkpoint/species_vocab.json")
     parser.add_argument("--request", default=None)
     parser.add_argument("--num-samples", type=int, default=50000)
     parser.add_argument("--guidance-weight", type=float, default=2.0)

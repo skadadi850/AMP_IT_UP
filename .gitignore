@@ -4,5 +4,14 @@ __pycache__/
 
 # Superseded regressor kept locally as evidence for the split correction
 # described in docs/METHOD.md. Not needed to run anything.
-checkpoints/mic_regressor_leaky_split.json
-checkpoints/mic_regressor_leaky_split_meta.json
+checkpoint/mic_regressor_leaky_split.json
+checkpoint/mic_regressor_leaky_split_meta.json
+
+# Model weights ship as GitHub Release assets, not in git. git-lfs is not
+# usable here: the organizers' validator does a plain `git clone`, and without
+# git-lfs installed -- or once LFS bandwidth is spent -- that yields pointer
+# files and the entry point fails to load a model. scripts/fetch_weights.py
+# downloads these and verifies them against checkpoint/SHA256SUMS, which IS
+# committed, and generate.py calls it before loading anything.
+checkpoint/masked_diffusion_best.pt
+checkpoint/mic_regressor.json

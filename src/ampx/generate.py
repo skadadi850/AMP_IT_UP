@@ -68,6 +68,7 @@ from .models.novelty_fast import ExhaustiveNovelty
 from .models.sampling import empirical_length_counts, length_grid, sample_library
 from .predictor import Oracle, resolve_device
 from .ranking import Candidate, select_top
+from .weights import ensure_weights
 
 #: Every stochastic component must derive from this one value. It is a
 #: module-level default rather than a required argument because the
@@ -77,8 +78,8 @@ DEFAULT_SEED = 42
 
 _HERE = Path(__file__).resolve().parent
 _REPO_ROOT = _HERE.parent.parent
-REFERENCE_FASTA = _REPO_ROOT / "data" / "reference" / "antibacterial.fasta"
-CHECKPOINTS = _REPO_ROOT / "checkpoints"
+REFERENCE_FASTA = _REPO_ROOT / "data" / "antibacterial.fasta"
+CHECKPOINTS = _REPO_ROOT / "checkpoint"
 GENERATOR_CKPT = CHECKPOINTS / "masked_diffusion_best.pt"
 SPECIES_VOCAB = CHECKPOINTS / "species_vocab.json"
 REGRESSOR = CHECKPOINTS / "mic_regressor.json"
@@ -98,12 +99,52 @@ BATCH_SIZE = 512
 OVERSAMPLE = 1.6
 MAX_ROUNDS = 12
 
-#: Species the oracle scores against when ranking. MIC is a
-#: (sequence, species) prediction, so a target must be named. Phase 5 decides
-#: whether to rank on one organism or aggregate across several; until then
-#: this is a single well-populated Gram-negative, which is also the species
-#: the regressor predicts best on the held-out split (Spearman 0.62).
-SCORE_SPECIES = "escherichia coli"
+#: The competition's strain panel (Appendix B of the competition document),
+#: collapsed to the species our regressor covers and weighted by how many
+#: strains of each appear in the panel. Ranking reproduces Overall Success
+#: Rate -- the fraction of the 20 strains a peptide inhibits at or below
+#: 16 uM -- rather than potency against any single organism.
+#:
+#: Two deliberate departures from the literal panel:
+#:
+#:   * Five species the regressor was trained on are absent here (C. albicans,
+#:     S. epidermidis, M. luteus, B. cereus, L. monocytogenes). None is assayed
+#:     by the competition, so scoring them would dilute the aggregate with
+#:     organisms that earn nothing.
+#:   * E. faecium (1 strain, VRE) is on the panel but absent from the
+#:     regressor's species vocabulary. Its strain is folded into E. faecalis,
+#:     the nearest covered organism -- same genus, also a VRE isolate on the
+#:     panel. That is a documented approximation, not a prediction for
+#:     E. faecium: it assumes the two enterococci respond similarly, which is
+#:     plausible but unverified here.
+#:
+#: Weights therefore sum to 20, the full panel.
+PANEL_WEIGHTS: dict[str, int] = {
+    # Gram-negative: 15 of 20 strains
+    "escherichia coli": 5,
+    "pseudomonas aeruginosa": 3,
+    "klebsiella pneumoniae": 2,
+    "acinetobacter baumannii": 2,
+    "salmonella enterica": 2,
+    "enterobacter cloacae": 1,
+    # Gram-positive: 5 of 20 strains, including E. faecium folded into
+    # E. faecalis (1 + 1 = 2).
+    "staphylococcus aureus": 2,
+    "enterococcus faecalis": 2,
+    "bacillus subtilis": 1,
+}
+
+#: Species above that are Gram-negative. Used for the eligibility floor and
+#: for the per-class diagnostics.
+PANEL_GRAM_NEGATIVE = frozenset({
+    "escherichia coli", "pseudomonas aeruginosa", "klebsiella pneumoniae",
+    "acinetobacter baumannii", "salmonella enterica", "enterobacter cloacae",
+})
+
+#: Potency threshold, in log10 micromolar. A strain counts toward success rate
+#: when predicted MIC is at or below 16 uM.
+POTENCY_THRESHOLD_UM = 16.0
+LOG_POTENCY_THRESHOLD = float(np.log10(POTENCY_THRESHOLD_UM))
 
 
 def set_global_determinism(seed: int) -> None:
@@ -238,28 +279,91 @@ def generate_library(
     return sorted(accepted[:n_sequences])
 
 
-def score_candidates(
-    sequences: list[str], oracle: Oracle, species: str = SCORE_SPECIES
-) -> list[Candidate]:
-    """Attach oracle predictions to sequences.
+def predict_panel(sequences: list[str], oracle: Oracle) -> dict[str, np.ndarray]:
+    """Predicted log10 MIC for every panel species, one array per species."""
+    return {
+        species: np.asarray(
+            oracle.predict(sequences, [species] * len(sequences)), dtype=np.float64
+        )
+        for species in PANEL_WEIGHTS
+    }
 
-    The oracle predicts log10 MIC, where lower is more potent, while
-    `Candidate.mean_score` is higher-is-better, so the sign is flipped.
+
+def panel_success(predictions: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Strain-weighted success rates from per-species predictions.
+
+    Returns `overall`, `gram_negative` and `gram_positive` success rates, each
+    the fraction of strains in that class predicted at or below 16 uM, plus
+    `mean_log_mic` for tie-breaking.
+    """
+    names = list(PANEL_WEIGHTS)
+    weights = np.array([PANEL_WEIGHTS[s] for s in names], dtype=np.float64)
+    is_negative = np.array([s in PANEL_GRAM_NEGATIVE for s in names])
+    # rows: species, columns: candidates
+    stack = np.vstack([predictions[s] for s in names])
+    hit = stack <= LOG_POTENCY_THRESHOLD
+
+    def rate(mask: np.ndarray) -> np.ndarray:
+        w = weights[mask]
+        return (hit[mask] * w[:, None]).sum(axis=0) / w.sum()
+
+    return {
+        "overall": rate(np.ones(len(names), dtype=bool)),
+        "gram_negative": rate(is_negative),
+        "gram_positive": rate(~is_negative),
+        "mean_log_mic": (stack * weights[:, None]).sum(axis=0) / weights.sum(),
+    }
+
+
+def score_candidates(sequences: list[str], oracle: Oracle) -> list[Candidate]:
+    """Rank candidates by predicted breadth across the competition panel.
+
+    Four of the five award categories score success rate across a strain
+    panel, so the ranked quantity is the strain-weighted fraction of the panel
+    a peptide is predicted to inhibit at or below 16 uM, with mean predicted
+    log10 MIC as the tie-break. A peptide that is exceptional against one
+    organism and inert against the rest scores poorly here, which is the
+    intent: 25 of the hundred are drawn at random, so the list needs a floor.
+
+    Candidates failing the eligibility floor -- at least one Gram-negative and
+    at least one Gram-positive strain below threshold -- are given a score
+    below every eligible candidate rather than being dropped, so
+    `select_top` always has enough to fill `k` and the exclusion is visible
+    in the ordering instead of silently shrinking the pool.
 
     `score_std` is 0.0 because the oracle is a single regressor, not an
     ensemble. That makes `Candidate.lcb` collapse to the mean and the `kappa`
     risk-aversion knob inert; it stays wired so an ensemble can be dropped in
     without touching the selection code.
     """
-    predicted = oracle.predict(sequences, [species] * len(sequences))
+    metrics = panel_success(predict_panel(sequences, oracle))
+    overall = metrics["overall"]
+    eligible = (metrics["gram_negative"] > 0) & (metrics["gram_positive"] > 0)
+
+    # Tie-break by potency, scaled far below one strain's worth of success
+    # rate so it can never outrank a genuine breadth difference.
+    tiebreak = -metrics["mean_log_mic"] * 1e-3
+    score = overall + tiebreak - np.where(eligible, 0.0, 10.0)
+
+    print(
+        f"panel   : {int(eligible.sum())}/{len(sequences)} candidates clear the "
+        f"eligibility floor (>=1 Gram-negative and >=1 Gram-positive strain "
+        f"<= {POTENCY_THRESHOLD_UM:g} uM)"
+    )
+    print(
+        f"          mean success rate: overall {overall.mean():.3f}, "
+        f"Gram-negative {metrics['gram_negative'].mean():.3f}, "
+        f"Gram-positive {metrics['gram_positive'].mean():.3f}"
+    )
+
     return [
         Candidate(
             sequence=seq,
-            mean_score=float(-value),
+            mean_score=float(value),
             score_std=0.0,
             cluster=_structural_cluster(seq),
         )
-        for seq, value in zip(sequences, predicted)
+        for seq, value in zip(sequences, score)
     ]
 
 
@@ -272,8 +376,6 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--device", default=None,
                         help="'cuda', 'cpu', or omitted to resolve automatically.")
-    parser.add_argument("--species", default=SCORE_SPECIES,
-                        help="Target organism the oracle ranks against.")
     parser.add_argument("--kappa", type=float, default=1.5,
                         help="Risk aversion in top-K selection. Inert while the "
                              "oracle is a single model (score_std is 0).")
@@ -287,6 +389,11 @@ def main() -> None:
 
     device = resolve_device(args.device)
     print(f"device  : {device}")
+
+    # A clean clone has the checksums but not the two large artifacts, so this
+    # has to happen before anything tries to load them. It is a no-op when
+    # they are already present and verified.
+    ensure_weights()
 
     # Load first, seed second. See set_global_determinism.
     model, species_vocab, oracle, novelty, references, calibration = load_models(device)
@@ -311,7 +418,7 @@ def main() -> None:
     if not report.ok:
         sys.exit(1)
 
-    candidates = score_candidates(library, oracle, species=args.species)
+    candidates = score_candidates(library, oracle)
     top = select_top(
         candidates,
         novelty=novelty,

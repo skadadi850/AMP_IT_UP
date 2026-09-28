@@ -54,8 +54,8 @@ src/ampx/
   predictor.py     calibrated activity / MIC surrogates
   models/          generator architectures
 scripts/           dataset build, training, evaluation
-checkpoints/       trained weights (git-lfs)
-data/reference/    organizers' exclusion set
+checkpoint/       trained weights (git-lfs)
+data/    organizers' exclusion set
 docs/METHOD.md     method abstract + data disclosure
 ```
 

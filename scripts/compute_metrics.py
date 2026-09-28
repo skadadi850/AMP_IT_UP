@@ -32,7 +32,7 @@ SECONDARY = ["expert_range_pct", "submittable_pct"]
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--metadata", default="data/processed/metadata.csv")
-    parser.add_argument("--reference", default="data/reference/antibacterial.fasta")
+    parser.add_argument("--reference", default="data/antibacterial.fasta")
     parser.add_argument("--libraries", default="results/comparison/libraries")
     parser.add_argument("--outdir", default="results/comparison")
     args = parser.parse_args()

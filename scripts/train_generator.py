@@ -4,7 +4,7 @@ Train the masked discrete diffusion model
 Usage:
     python scripts/train_masked_diffusion.py \
         --metadata data/processed/metadata.csv \
-        --species-vocab checkpoints/species_vocab.json \
+        --species-vocab checkpoint/species_vocab.json \
         --splits data/raw/splits_with_negatives.csv \
         --holdout-fold 0 \
         --output checkpoints
@@ -126,7 +126,7 @@ def run_epoch(model, loader, optimizer, device, p_axis, p_all, train):
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--metadata", default="data/processed/metadata.csv")
-    parser.add_argument("--species-vocab", default="checkpoints/species_vocab.json")
+    parser.add_argument("--species-vocab", default="checkpoint/species_vocab.json")
     parser.add_argument("--splits", default=None)
     parser.add_argument("--holdout-fold", type=int, default=0)
     parser.add_argument("--output", default="checkpoints",

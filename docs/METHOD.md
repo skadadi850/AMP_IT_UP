@@ -55,7 +55,7 @@ The inference dependencies in `pyproject.toml` pin `torch`, `transformers` and
 `xgboost` to exact versions, because each determines how a shipped checkpoint
 is read rather than merely how fast it runs:
 
-- **`xgboost==3.2.0`** — the version recorded in `checkpoints/mic_regressor.json`'s
+- **`xgboost==3.2.0`** — the version recorded in `checkpoint/mic_regressor.json`'s
   own `version` field. That model holds 1,807 trees with `best_iteration=1706`,
   so 101 trees sit past the early-stopping point. Whether a reader truncates at
   `best_iteration` or predicts with every tree has changed across XGBoost
@@ -66,11 +66,11 @@ is read rather than merely how fast it runs:
   indicators, 5 Gram indicators and those 480 embedding dimensions, so a
   different encoder yields a feature matrix of the wrong width or the wrong
   meaning.
-- **`torch==2.11.0`** — trained `checkpoints/masked_diffusion_best.pt`.
+- **`torch==2.11.0`** — trained `checkpoint/masked_diffusion_best.pt`.
 
 ### Encoder identity, recovered after the fact
 
-`checkpoints/mic_regressor_meta.json` now carries
+`checkpoint/mic_regressor_meta.json` now carries
 `"esm_model": "facebook/esm2_t12_35M_UR50D"`. This key was **not written at
 training time** — the training script recorded only `uses_embeddings` and
 `embedding_dim`. It was recovered from the training job's own log line
@@ -180,7 +180,7 @@ being a constant in the code.
 - Representation:
 - Conditioning:
 - Sampler:
-- Checkpoint: `checkpoints/`
+- Checkpoint: `checkpoint/`
 
 ## Surrogate predictors
 
@@ -192,19 +192,84 @@ being a constant in the code.
 
 1. Alphabet restricted to the 20 standard residues; length 8-50.
 2. Deduplication.
-3. Exact-match exclusion against `data/reference/antibacterial.fasta`.
+3. Exact-match exclusion against `data/antibacterial.fasta`.
 4. _(physicochemical windows, synthesizability, etc.)_
 
 ## Top-100 selection procedure
 
-_(This is explicitly requested by the organizers. Describe the objective, the
-uncertainty estimate, the diversity constraint, and the novelty screen.)_
+**Objective — predicted breadth across the competition strain panel.**
+Candidates are ranked by the strain-weighted fraction of the 20-strain panel
+(Appendix B) they are predicted to inhibit at or below 16 µM, which is the
+Overall Success Rate the competition scores, with mean predicted log₁₀ MIC as
+the tie-break. Ranking by potency against a single organism was rejected:
+four of the five award categories score success rate across strain panels, and
+25 of our hundred are drawn at random, so the list needs a floor rather than a
+peak.
 
-- Objective:
-- Uncertainty:
-- Diversity constraint:
-- Novelty screen: Levenshtein ratio <= 0.80 vs all reference sequences, plus
-  MMseqs2 identity <= 80% vs the MarLys AMP database.
+The panel is collapsed onto the species the MIC regressor covers, weighted by
+strain count, summing to the full 20:
+
+| Species | Strains | Class |
+|---|---:|---|
+| *E. coli* | 5 | Gram-negative |
+| *P. aeruginosa* | 3 | Gram-negative |
+| *K. pneumoniae* | 2 | Gram-negative |
+| *A. baumannii* | 2 | Gram-negative |
+| *S. enterica* | 2 | Gram-negative |
+| *E. cloacae* | 1 | Gram-negative |
+| *S. aureus* | 2 | Gram-positive |
+| *E. faecalis* | 2 | Gram-positive |
+| *B. subtilis* | 1 | Gram-positive |
+
+Two departures from the literal panel, both deliberate:
+
+- **Five trained species are excluded** — *C. albicans*, *S. epidermidis*,
+  *M. luteus*, *B. cereus*, *L. monocytogenes*. None appears on the panel, so
+  including them would dilute the ranked quantity with organisms that are
+  never assayed.
+- ***E. faecium* is folded into *E. faecalis*.** The panel includes one
+  *E. faecium* VRE strain, which is absent from the regressor's species
+  vocabulary, so its weight is assigned to *E. faecalis* — same genus, and
+  also represented on the panel by a VRE isolate. This is an approximation,
+  not a prediction for *E. faecium*: it assumes the two enterococci respond
+  similarly, which is plausible and unverified here.
+
+**Eligibility floor.** A candidate must be predicted below 16 µM against at
+least one Gram-negative *and* at least one Gram-positive strain. Gram-Positive
+Activity is its own award category over only 5 strains, and a
+Gram-negative-only peptide also caps at 75% Overall, so a peptide potent in
+one class alone wins nothing in either. Ineligible candidates are ranked below
+every eligible one rather than removed, so the pool never silently shrinks
+below 100 and the exclusion is visible in the ordering. Gram-negative and
+Gram-positive success rates are reported separately at generation time as
+diagnostics.
+
+**No MDR-specific targeting.** Seven of the 20 strains are multi-drug
+resistant isolates, and we make no attempt to favour them. The regressor
+predicts from (sequence, species) and has no feature that distinguishes a
+resistant isolate from a susceptible one of the same species, so an
+MDR-directed objective would be uninformed by the model — it would express a
+preference the predictor cannot actually act on. MDR strains therefore
+contribute to our panel aggregate only through their species.
+
+**Uncertainty.** None is modelled. The oracle is a single regressor, so
+`Candidate.score_std` is 0 and the `kappa` risk-aversion term in `select_top`
+is inert. It remains wired so an ensemble can replace the point predictor
+without changing the selection code.
+
+**Diversity constraint.** At most 4 candidates per structural cluster, where
+clusters are currently a coarse length-band × charge-band bucket.
+
+**Novelty screen.** Levenshtein ratio ≤ 0.80 against every one of the 39,448
+reference sequences, computed exhaustively rather than against a shortlist,
+since a single sequence above the ceiling invalidates the list.
+
+**How far to trust the ranking.** The oracle's held-out Spearman is 0.533 on a
+cluster-disjoint split, with a mean absolute error of 0.509 log₁₀ units — a
+typical prediction is off by roughly threefold in concentration. It is used as
+a coarse enrichment filter and a breadth estimator, not as a fine-grained
+ordering of the top 100, and nothing in the procedure depends on the exact
+order near the top.
 
 ## Manual interventions
 
@@ -214,6 +279,25 @@ partly about separating model quality from human curation.)_
 ## Reproducibility
 
 Fixed seed 42. `uv sync && uv run generate` produces byte-identical output.
+
+Model weights are **not** stored in git. `checkpoint/masked_diffusion_best.pt`
+and `checkpoint/mic_regressor.json` ship as GitHub Release assets;
+`checkpoint/SHA256SUMS` is committed, and `ampx.weights.ensure_weights` --
+called at the top of `generate.main`, and exposed as
+`scripts/fetch_weights.py` -- downloads and verifies them, so a clean clone
+runs with no manual step. git-lfs was deliberately abandoned for this: the
+organizers validate with a plain `git clone`, and on a machine without git-lfs
+installed, or after the repository's LFS bandwidth is spent, an LFS-tracked
+file arrives as a small pointer that fails only later, deep inside a model
+load. The fetcher detects a pointer file explicitly and replaces it.
+
+`scripts/verify_submission.py` is the organizers' own validator from the
+template repository, with one addition: a step that constructs an `Oracle` and
+scores a sequence in the synced environment. Importing the package proves much
+less than it appears to, because it builds no model and reads no checkpoint —
+that gap is how a missing scikit-learn dependency survived an earlier import
+check. The file is otherwise unmodified, so its provenance is visible in a
+diff against the template.
 Verified on: _(OS, Python, GPU)_
 
 ## Use of AI assistants
