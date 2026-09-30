@@ -8,7 +8,7 @@ Submission to the [AMP Challenge](https://szczurek-lab.github.io/amp-challenge-w
 
 Antimicrobial peptides (AMPs) have emerged as promising therapeutic candidates, with advances in computational approaches and high-throughput screening accelerating their discovery and optimization. However, designing effective de novo AMPs requires addressing potency, selectivity, and toxicity. Existing generative approaches often rely on post-hoc filtering, which selects candidates only after generation, or indirect conditioning through latent representations from protein language models (PLMs), which may limit simultaneous control over these design objectives. Here, we introduce CMD-AMP, a masked discrete diffusion model conditioned on structural and functional features to directly generate AMP sequences. To explicitly learn amphipathic structural organization, CMD-AMP masks residues on the same face of an α-helix, directing the model to reconstruct these membrane-interacting surfaces. CMD-AMP further incorporates sequence-derived features as well as experimental data, including MIC and hemolytic activity, using observation masking. Across 50,000 generated peptides, no sequence exceeds 80% identity to any of 39,448 antibacterial peptides used for training, and a held-out MIC regressor predicts potency comparable to that of known AMPs. These results indicate that CMD-AMP can be used for de novo AMP generation for concurrent design constraints.
 
-This work is computational. It contains no wet-lab data.
+This work is submitted for wetlab validation. 
 
 ## Quick start
 
