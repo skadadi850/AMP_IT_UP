@@ -2,7 +2,7 @@
 Train the masked discrete diffusion model
 
 Usage:
-    python scripts/train_masked_diffusion.py \
+    uv run python scripts/train_generator.py \
         --metadata data/processed/metadata.csv \
         --species-vocab checkpoint/species_vocab.json \
         --splits data/raw/splits_with_negatives.csv \

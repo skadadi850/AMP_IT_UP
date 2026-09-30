@@ -95,7 +95,7 @@ SOURCES: list[Source] = [
               "set -- the 39,448 are byte-for-byte identical to "
               "data/antibacterial.fasta -- so the generator was trained on the "
               "set its output must stay 80% distant from. That decision is "
-              "declared in docs/METHOD.md rather than left to be inferred. "
+              "declared in the Data disclosure section of README.md rather than left to be inferred. "
               "See PLAN.md 4.1.",
     ),
     Source(
@@ -206,7 +206,7 @@ SOURCES: list[Source] = [
               "(datasource_has_modifications=true) while excluding unusual "
               "modifications, so 37.4% of the MIC rows are C-terminally "
               "amidated -- a disclosed bias relative to our free-termini "
-              "linear designs, see docs/METHOD.md.",
+              "linear designs, see the Data disclosure section of README.md.",
     ),
     Source(
         id="hemopi2",
@@ -260,7 +260,7 @@ SOURCES: list[Source] = [
               "closes on sORFdb alone: 318,268 length-filtered minus 48,435 "
               "AMP-like equals the 269,833 in negatives.fasta. Retained in "
               "this registry so the disclosure records what was acquired, not "
-              "only what was used. See docs/METHOD.md, 'SmProt v2 was "
+              "only what was used. See the Data disclosure section of README.md, 'SmProt v2 was "
               "obtained but never used'.",
     ),
 ]

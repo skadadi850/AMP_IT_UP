@@ -1,4 +1,4 @@
-"""TODO: see docs/PLAN.md."""
+"""Not implemented."""
 
 
 def main() -> None:

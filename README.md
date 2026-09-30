@@ -60,7 +60,7 @@ runs in float32.
 
 ## Method
 
-Full description and data disclosure: [docs/METHOD.md](docs/METHOD.md).
+Data provenance and known biases are in [Data disclosure](#data-disclosure). The rebuild path for the harmonized activity table is in [data/processed/README.md](data/processed/README.md).
 
 ### Generator
 
@@ -215,7 +215,7 @@ src/ampx/
 scripts/             dataset build, training, calibration, evaluation
 checkpoint/          weights and calibration files (large files fetched from the Release)
 data/                organizers' exclusion set (antibacterial.fasta)
-docs/                METHOD.md, plans, preregistration notes, ranked overflow list
+docs/                ranked overflow list, written by uv run generate
 results/             calibration and selection outputs
 generate/            library.fasta and top.fasta
 ```
@@ -229,7 +229,22 @@ generate/            library.fasta and top.fasta
 - Novelty is measured as Levenshtein ratio against the 39,448-sequence reference set. The
   challenge's own similarity screening may use alignment identity against a larger database.
   Passing the local check is necessary, not sufficient.
-- HC50 conditioning targets come from HemoPI-2 predictions, not measurements.
+- HC50 conditioning targets come from HemoPI-2 predictions, not measurements, and 1,367 of those predictions (3.47%) were computed on truncated sequences.
+- 37.4% of the MIC training rows are C-terminally amidated, while the designs have free termini, so predicted potency may overstate the activity of the submitted forms.
+
+## Data disclosure
+
+**Generator pretraining (309,272 sequences).** Positives are 39,448 antibacterial peptides from MLAMP_db. The generator was trained on the sequences it must stay novel against, so novelty is enforced at sampling and selection, not by holding that set out. Negatives are 269,824 real translated small ORFs from sORFdb (Zenodo record 10688271, redistribution terms not confirmed). Of 34,007,166 protein records, 318,268 fall in the 8 to 50 residue range, and an AMP-like filter removed 48,435 of them, leaving 269,833 in the negatives file, of which 269,824 entered the pretraining corpus. The filter script is not included in this repository. SmProt v2 was downloaded but never used, and no SmProt sequence entered any corpus.
+
+**Fine-tuning (60,405 rows).** The MLAMP peptides joined to GRAMPA MIC values and to HC50 values, measured where HemoPI-2 has a measurement and predicted otherwise.
+
+**MIC labels.** GRAMPA aggregates four databases. Of 41,500 rows surviving the ingest filter, DBAASP contributes 32,880 (CC BY 4.0), DRAMP 4,459, APD 3,554 and DADP 607 (terms not confirmed for the last three). The harmonized table holds 39,117 MIC rows over 5,602 peptides and 659 species. The filter keeps peptides with modifications and excludes unusual modifications, so 37.4% of the rows are C-terminally amidated. The MIC regressor was retrained under a cluster-disjoint split after an earlier split leaked between train and test; the superseded model is not shipped.
+
+**HC50 labels.** 1,908 measured values from the HemoPI-2 repository (GPL-3.0, not redistributed here) and 39,448 predicted values from running HemoPI-2's regression script over the positives. The predicted values are model output, so the HC50 axis steers generation toward HemoPI-2's predictions, not toward measured hemolysis, and the provenance flag lets the model tell the two apart. That script truncates sequences longer than 40 residues before featurizing, so 1,367 predictions (3.47%) describe a truncated peptide.
+
+**Not redistributed.** The harmonized activity table, because its sources have differing or unconfirmed terms. Every source is public. [data/processed/README.md](data/processed/README.md) gives the rebuild command, retrieval dates, expected row counts and the checksum of the table used for training.
+
+**Manual intervention.** None. No sequence was hand-selected, edited or removed by inspection. Human decisions were the conditioning targets, the ranking key, the length cap and the filter thresholds.
 
 ## Data sources
 
@@ -243,6 +258,10 @@ generate/            library.fasta and top.fasta
 4. Rathore, A. S., Kumar, N., Choudhury, S., et al. (2025). Prediction of hemolytic peptides and
    their hemolytic concentration. Communications Biology, 8, 176.
    https://doi.org/10.1038/s42003-025-07615-w
+
+## Use of AI assistants
+
+Large language models were used to help write code and documentation for this repository.
 
 ## License
 

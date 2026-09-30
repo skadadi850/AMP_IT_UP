@@ -4,7 +4,7 @@ MIC regressor
 Predicts log10 MIC (uM) for a (sequence, species) pair. 
 
 Usage:
-    python scripts/train_mic_regressor.py \
+    uv run python scripts/train_predictor.py \
         --table $D/processed/refinement/mic_table.csv \
         --clusters $D/processed/refinement/clusters_40.tsv \
         --cluster-fasta $D/processed/refinement/cluster_input.fasta \

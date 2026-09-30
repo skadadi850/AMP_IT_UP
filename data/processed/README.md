@@ -43,7 +43,7 @@ redistributed even with the HemoPI-2 rows removed — see
 **The predicted HC50 column is model output, not HemoPI-2's data.** It is
 produced by running HemoPI-2's own `hemopi2_regression.py` over all 39,448
 MLAMP positives. Program output is not covered by the program's licence, but
-it is also not measurement: see the disclosure in `docs/METHOD.md` on what the
+it is also not measurement: see the disclosure in the Data disclosure section of the top-level `README.md` on what the
 `log_hc50` axis actually steers toward, and on the `lenchk()` truncation that
 affects the 1,367 peptides longer than 40 residues.
 
@@ -63,7 +63,7 @@ containing the per-source column mappings and row filters and no third-party
 data. It is what makes this rebuild reproducible rather than approximate. The
 MIC filter it encodes (`datasource_has_modifications: true`,
 `has_unusual_modification: false`) is deliberate and is discussed in
-`docs/METHOD.md`.
+the Data disclosure section of the top-level `README.md`.
 
 ## Expected output, so the rebuild is checkable
 
