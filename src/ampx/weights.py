@@ -161,6 +161,35 @@ def ensure_weights(quiet: bool = False, base_url: str = DEFAULT_BASE_URL) -> Non
             )
         say(f"{name}: downloaded and verified")
 
+def fetch_if_missing(path: str | Path, base_url: str = DEFAULT_BASE_URL) -> None:
+    """Download `path` if it is a shipped artifact that is absent.
+
+    For code that builds a model directly instead of going through
+    `ampx.generate.main`, which calls `ensure_weights` first. Only a missing
+    file is acted on: an existing file is neither re-hashed nor replaced, so a
+    checkpoint retrained locally under the same name is left alone.
+    `ensure_weights` is the call that verifies.
+    """
+    dest = Path(path)
+    if dest.exists() or dest.name not in FETCHED:
+        return
+    digest = read_expected_sums().get(dest.name)
+    if digest is None:
+        raise SystemExit(f"{dest.name} is not listed in {SUMS_FILE}")
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    url = f"{base_url}/{dest.name}"
+    print(f"{dest.name}: downloading from {url}")
+    _download(url, dest)
+
+    actual = sha256(dest)
+    if actual != digest:
+        dest.unlink(missing_ok=True)
+        raise SystemExit(
+            f"{dest.name} failed verification after download\n"
+            f"  expected {digest}\n  actual   {actual}"
+        )
+    print(f"{dest.name}: downloaded and verified")
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])

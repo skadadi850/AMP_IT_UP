@@ -208,21 +208,37 @@ class MaskedDiffusionModel(nn.Module):
         tokens: torch.Tensor,
         t: torch.Tensor,
         condition: Optional[Dict[str, torch.Tensor]] = None,
+        autocast_dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
         batch_size = tokens.shape[0]
         if condition is None:
             condition = self.condition_encoder.null_condition(batch_size, tokens.device)
 
-        c = self.time_embedding(t) + self.condition_encoder(condition)
-        x = self.token_embedding(tokens) + self.position_embedding
+        device_type = tokens.device.type
 
-        for block in self.blocks:
-            x = block(x, c)
+        # Conditioning path and embeddings stay in fp32.
+        with torch.autocast(device_type=device_type, enabled=False):
+            c = self.time_embedding(t) + self.condition_encoder(condition)
+            x = self.token_embedding(tokens) + self.position_embedding
 
-        shift, scale = self.final_modulation(c).unsqueeze(1).chunk(2, dim=-1)
-        x = self.final_norm(x) * (1.0 + scale) + shift
+        # Blocks run under autocast. LayerNorm is promoted to fp32 by autocast
+        # and the residual stream stays fp32 because bf16 branch outputs are
+        # added into an fp32 tensor.
+        with torch.autocast(
+            device_type=device_type,
+            dtype=autocast_dtype,
+            enabled=autocast_dtype is not None,
+        ):
+            for block in self.blocks:
+                x = block(x, c)
+
+        # Output head in fp32 so guidance and sampling see full-precision logits.
+        with torch.autocast(device_type=device_type, enabled=False):
+            x = x.float()
+            shift, scale = self.final_modulation(c).unsqueeze(1).chunk(2, dim=-1)
+            x = self.final_norm(x) * (1.0 + scale) + shift
+            out = self.output_proj(x)
         # MASK is an absorbing state, never a prediction target.
-        out = self.output_proj(x)
         out[..., MASK_TOKEN] = torch.finfo(out.dtype).min
         return out
 
@@ -331,6 +347,7 @@ class MaskedDiffusionModel(nn.Module):
         condition: Optional[Dict[str, torch.Tensor]],
         guidance_weight: float,
         exempt_axes: Sequence[str] = (),
+        autocast_dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
         """
         Classifier-free guidance in logit space, one forward pass.
@@ -344,10 +361,13 @@ class MaskedDiffusionModel(nn.Module):
         Pass those axis names in `exempt_axes` to carry their requested value
         into the unconditional branch instead, so the guidance direction
         isolates the axes actually being varied.
+
+        `logits` returns fp32 regardless of `autocast_dtype`, so the guidance
+        combination below is always computed in fp32.
         """
         batch_size = tokens.shape[0]
         if condition is None or guidance_weight == 0.0:
-            return self.logits(tokens, t, condition)
+            return self.logits(tokens, t, condition, autocast_dtype=autocast_dtype)
 
         null = self.condition_encoder.null_condition(batch_size, tokens.device)
         for axis in exempt_axes:
@@ -365,6 +385,7 @@ class MaskedDiffusionModel(nn.Module):
             torch.cat([tokens, tokens], dim=0),
             torch.cat([t, t], dim=0),
             merged,
+            autocast_dtype=autocast_dtype,
         )
         cond, uncond = both[:batch_size], both[batch_size:]
         return uncond + guidance_weight * (cond - uncond)
@@ -498,6 +519,7 @@ class MaskedDiffusionModel(nn.Module):
         pad_bias: float = 0.0,
         guidance_exempt_axes: Sequence[str] = (),
         init_tokens: Optional[torch.Tensor] = None,
+        autocast_dtype: Optional[torch.dtype] = None,
     ) -> List[str]:
         """
         Iterative unmasking, from a fully masked canvas or a partial one.
@@ -514,9 +536,20 @@ class MaskedDiffusionModel(nn.Module):
         never overwritten -- both reveal branches intersect with still_masked
         and the commit is a torch.where against it -- so the guarantee comes
         from the existing loop rather than from new bookkeeping.
+
+        autocast_dtype runs the transformer blocks under autocast at that
+        dtype on CUDA; the output head and guidance stay fp32. It is ignored
+        on other devices.
+
+        With reveal="structured" the set of positions committed at each step
+        is a function of the priority ranking and the schedule alone, not of
+        the model output. Steps that commit nothing are skipped without a
+        forward pass, since their output would be discarded.
         """
         self.eval()
         device = self.position_embedding.device
+        if device.type != "cuda":
+            autocast_dtype = None
 
         if init_tokens is not None:
             tokens = init_tokens.to(device=device, dtype=torch.long).clone()
@@ -555,9 +588,10 @@ class MaskedDiffusionModel(nn.Module):
         # starts at 0.3, or the model is denoising against a distribution it
         # never saw in training.
         initial_masked = (tokens == MASK_TOKEN).sum(dim=1)
+        max_masked = int(initial_masked.max().item())
         t_start = 1.0
         if init_tokens is not None:
-            t_start = float(initial_masked.max().item()) / float(self.canvas)
+            t_start = float(max_masked) / float(self.canvas)
             t_start = min(1.0, max(t_start, 1.0 / float(num_steps)))
         schedule = torch.linspace(t_start, 0.0, num_steps + 1, device=device)
 
@@ -573,9 +607,39 @@ class MaskedDiffusionModel(nn.Module):
             if not bool(still_masked.any()):
                 break
 
+            to_reveal = None
+            if priority is not None:
+                # Keep the k highest-priority positions masked, where k is the
+                # count the schedule calls for at t_next. The masked remainder
+                # therefore retains the span or face shape of this sample.
+                # Fraction of the ORIGINALLY masked positions still to hold
+                # back. Scaling by the full canvas instead would exceed the
+                # masked count for most of the schedule when inpainting, so
+                # reveal would stall and then commit everything at once.
+                remaining = float(t_next) / max(t_start, 1e-6)
+                keep = int(round(remaining * float(max_masked)))
+                if keep <= 0 or t_next <= 0:
+                    to_reveal = still_masked
+                else:
+                    masked_priority = torch.where(
+                        still_masked, priority,
+                        torch.full_like(priority, -float("inf")),
+                    )
+                    order = masked_priority.argsort(dim=1, descending=True)
+                    rank = torch.empty_like(order)
+                    rank.scatter_(
+                        1, order,
+                        torch.arange(self.canvas, device=device)
+                        .expand(batch_size, self.canvas),
+                    )
+                    to_reveal = still_masked & (rank >= keep)
+                if not bool(to_reveal.any()):
+                    continue
+
             logits = self.guided_logits(
                 tokens, t_now.expand(batch_size), condition, guidance_weight,
                 exempt_axes=guidance_exempt_axes,
+                autocast_dtype=autocast_dtype,
             )
             logits = self.constrain(
                 logits, tokens, target_length,
@@ -592,31 +656,6 @@ class MaskedDiffusionModel(nn.Module):
                 commit = float((t_now - t_next) / t_now.clamp(min=1e-6))
                 draw = torch.rand(tokens.shape, device=device, generator=generator)
                 to_reveal = still_masked & ((draw < commit) | (t_next <= 0))
-            else:
-                # Keep the k highest-priority positions masked, where k is the
-                # count the schedule calls for at t_next. The masked remainder
-                # therefore retains the span or face shape of this sample.
-                # Fraction of the ORIGINALLY masked positions still to hold
-                # back. Scaling by the full canvas instead would exceed the
-                # masked count for most of the schedule when inpainting, so
-                # reveal would stall and then commit everything at once.
-                remaining = float(t_next) / max(t_start, 1e-6)
-                keep = int(round(remaining * float(initial_masked.max().item())))
-                if keep <= 0 or t_next <= 0:
-                    to_reveal = still_masked
-                else:
-                    masked_priority = torch.where(
-                        still_masked, priority,
-                        torch.full_like(priority, -float("inf")),
-                    )
-                    order = masked_priority.argsort(dim=1, descending=True)
-                    rank = torch.empty_like(order)
-                    rank.scatter_(
-                        1, order,
-                        torch.arange(self.canvas, device=device)
-                        .expand(batch_size, self.canvas),
-                    )
-                    to_reveal = still_masked & (rank >= keep)
             tokens = torch.where(to_reveal, sampled, tokens)
 
         return [decode_tokens(row.tolist()) for row in tokens]
@@ -651,6 +690,9 @@ class MaskedDiffusionModel(nn.Module):
 
     @classmethod
     def load(cls, path: str, device: str = "cuda"):
+        from ..weights import fetch_if_missing
+
+        fetch_if_missing(path)
         checkpoint = torch.load(path, map_location=device)
         config = dict(checkpoint["config"])
         config["device"] = device

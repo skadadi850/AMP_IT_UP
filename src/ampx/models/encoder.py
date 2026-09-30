@@ -50,15 +50,33 @@ class ESM2Encoder:
         # `revision` is only meaningful for a Hub id; a local directory has no
         # commits, so it is dropped rather than raising for that case.
         hub = {} if Path(model_path).exists() else {"revision": revision}
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path, **hub)
+
         # add_pooling_layer=False: pooling here is the mask-weighted mean over
         # last_hidden_state below, so EsmModel's own pooler is never read. It
         # is also absent from these weights, so constructing it draws from
         # torch's global RNG at load time -- which would shift every downstream
         # sample if a seed were set before the encoder was built.
-        self.model = AutoModel.from_pretrained(
-            model_path, add_pooling_layer=False, **hub
-        ).to(device)
+        def load(local_files_only: bool):
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_path, local_files_only=local_files_only, **hub
+            )
+            model = AutoModel.from_pretrained(
+                model_path,
+                add_pooling_layer=False,
+                local_files_only=local_files_only,
+                **hub,
+            )
+            return tokenizer, model
+
+        # The cache is read first. The tokenizer load otherwise lists the
+        # repo's files over the network on every call, so a dropped connection
+        # would fail a run whose files are already on disk. The Hub is
+        # contacted only when the pinned revision is not cached.
+        try:
+            self.tokenizer, model = load(local_files_only=True)
+        except OSError:
+            self.tokenizer, model = load(local_files_only=False)
+        self.model = model.to(device)
         self.model.eval()
         self.embedding_dim = int(self.model.config.hidden_size)
 

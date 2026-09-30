@@ -49,7 +49,7 @@ import os
 import random
 import sys
 from pathlib import Path
-
+import torch
 import numpy as np
 
 from .compliance import (
@@ -104,8 +104,9 @@ LENGTH_CALIBRATIONS = (
 GUIDANCE_WEIGHT = 2.0
 SAMPLING_STEPS = 128
 TEMPERATURE = 1.0
-BATCH_SIZE = 512
+BATCH_SIZE = 1024
 
+SAMPLING_DTYPE = torch.bfloat16
 #: Oversample factor per round. Compliance, dedup and the novelty ceiling all
 #: reject candidates, so a round must ask for more than it needs.
 OVERSAMPLE = 1.6
@@ -455,6 +456,7 @@ def generate_library(
             free_length=False,
             reveal=reveal,
             pad_bias=0.0,
+            autocast_dtype=SAMPLING_DTYPE,
         )
 
         # Cheap filters first, so the identity scan only sees survivors.
@@ -489,12 +491,15 @@ def generate_library(
 
 
 def predict_panel(sequences: list[str], oracle: Oracle) -> dict[str, np.ndarray]:
-    """Predicted log10 MIC for every panel species, one array per species."""
+    """Predicted log10 MIC for every panel species, one array per species.
+
+    Descriptors and the ESM-2 embedding depend only on the sequence, so they
+    are computed once and shared across the panel species.
+    """
+    predictions = oracle.predict_species(sequences, list(PANEL_WEIGHTS))
     return {
-        species: np.asarray(
-            oracle.predict(sequences, [species] * len(sequences)), dtype=np.float64
-        )
-        for species in PANEL_WEIGHTS
+        name: np.asarray(values, dtype=np.float64)
+        for name, values in predictions.items()
     }
 
 

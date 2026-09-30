@@ -259,6 +259,7 @@ def sample_library(
     free_length: bool = False,
     reveal: str = "uniform",
     pad_bias: float = 0.0,
+    autocast_dtype=None,
 ) -> list:
     """Batched sampling from a masked-diffusion checkpoint.
 
@@ -272,6 +273,9 @@ def sample_library(
     `seed` seeds a dedicated `torch.Generator` on the sampling device rather
     than the global RNG, so sampling is reproducible independently of whatever
     else has drawn from the global stream.
+
+    `autocast_dtype` is forwarded to `MaskedDiffusionModel.sample`. The default
+    of None keeps fp32 sampling for callers that do not pass it.
     """
     device = next(model.parameters()).device
     total = condition["species_idx"].shape[0]
@@ -296,6 +300,7 @@ def sample_library(
                 free_length=free_length,
                 reveal=reveal,
                 pad_bias=pad_bias,
+                autocast_dtype=autocast_dtype,
             )
         )
     return sequences

@@ -21,6 +21,7 @@ import pandas as pd
 
 from .models.encoder import DEFAULT_ESM_MODEL, ESM2Encoder
 from .models.features import compute_sequence_features, gram_for_species
+from .weights import fetch_if_missing
 
 #: Descriptor columns, in the order the regressor was trained on. Order is part
 #: of the model contract: XGBoost indexes columns positionally, so reordering
@@ -92,6 +93,7 @@ class Oracle:
         # A raw Booster rather than XGBRegressor: the sklearn wrapper imports
         # scikit-learn at construction, which inference would otherwise have to
         # ship for no other reason.
+        fetch_if_missing(model_path)
         self.model = xgb.Booster()
         self.model.load_model(model_path)
 
@@ -132,21 +134,40 @@ class Oracle:
                     "the encoder disagree; re-train or point at the right model."
                 )
 
-    def predict(self, sequences, species):
-        """Predicted log10 MIC (uM). Lower is more potent."""
-        if not len(sequences):
-            return np.zeros(0, dtype=np.float32)
-        frame = pd.DataFrame({"sequence": list(sequences), "species": list(species)})
-        features_frame = compute_sequence_features(frame["sequence"])
-        for column in features_frame.columns:
-            frame[column] = features_frame[column].values
-        frame["gram"] = frame["species"].map(gram_for_species)
+    def _sequence_block(self, sequences):
+        """Species-independent inputs: descriptors and the ESM-2 embedding."""
+        frame = pd.DataFrame({"sequence": list(sequences)})
+        descriptors = compute_sequence_features(frame["sequence"])
+        for column in descriptors.columns:
+            frame[column] = descriptors[column].values
         embeddings = None
         if self.encoder is not None:
             embeddings = self.encoder.encode(frame["sequence"].tolist(), batch_size=256)
             frame["row"] = np.arange(len(frame))
-        features, _ = build_features(frame, embeddings, self.meta["species_levels"])
+        return frame, embeddings
+
+    def _predict_block(self, frame, embeddings, species):
         import xgboost as xgb
+        frame = frame.assign(species=species)
+        frame["gram"] = frame["species"].map(gram_for_species)
+        features, _ = build_features(frame, embeddings, self.meta["species_levels"])
         return self.model.predict(
             xgb.DMatrix(features), iteration_range=(0, self.n_trees)
         )
+
+    def predict(self, sequences, species):
+        """Predicted log10 MIC (uM). Lower is more potent."""
+        if not len(sequences):
+            return np.zeros(0, dtype=np.float32)
+        frame, embeddings = self._sequence_block(sequences)
+        return self._predict_block(frame, embeddings, list(species))
+
+    def predict_species(self, sequences, species_names):
+        """Predicted log10 MIC for each name in `species_names`, encoding once."""
+        if not len(sequences):
+            return {name: np.zeros(0, dtype=np.float32) for name in species_names}
+        frame, embeddings = self._sequence_block(sequences)
+        return {
+            name: self._predict_block(frame, embeddings, name)
+            for name in species_names
+        }
