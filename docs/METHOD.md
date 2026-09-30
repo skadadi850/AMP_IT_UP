@@ -4,6 +4,8 @@
 > training-data disclosure, filters applied, and selection procedure are all
 > required for benchmark participation, and the LLM-assistance disclosure is
 > required by the NeurIPS Main Track Handbook.
+##FInal 
+
 
 ## Abstract
 
@@ -30,9 +32,16 @@ The top 100 are ranked by predicted breadth across the competition's
 20-strain panel rather than potency against one organism. An XGBoost MIC
 regressor over ESM-2 embeddings and physicochemical descriptors scores each
 candidate against every panel species, weighted by strain count; candidates
-are ordered by the fraction of the panel predicted at or below 16 µM, with
-mean predicted MIC as the tie-break, under a hard floor requiring activity
-against at least one Gram-negative and one Gram-positive strain. The
+are ordered by the **strain-weighted mean predicted log₁₀ MIC** across the
+panel, under a hard floor requiring activity against at least one
+Gram-negative and one Gram-positive strain. The fraction of the panel
+predicted at or below 16 µM — the Overall Success Rate the competition
+scores — is computed and reported as a diagnostic rather than used as the
+key, because it saturates at 1.00 among the candidates actually competing
+for the hundred places and so cannot order them; see
+[The oracle is not extrapolating](#the-oracle-is-not-extrapolating-and-the-ranking-key-reflects-that).
+The key is a breadth key either way: it is the strain-count-weighted mean
+over nine species, not potency against one. The
 regressor is validated on a cluster-disjoint 40%-identity split (Spearman
 0.533) and used as a breadth estimator, not a fine-grained ranking.
 
@@ -44,9 +53,13 @@ See [../data/README.md](../data/README.md) for the full provenance table.
   [Generator corpus, by stage](#generator-corpus-by-stage) below. Stage 5a
   pretrains on 309,272 sequences; stage 5b fine-tunes on 60,405 conditioned
   rows.
-- **Predictor corpus:** the MIC arm of
-  `data/processed/activity_harmonized.csv` — 39,117 rows over **5,602 unique
-  peptides** and 659 species, from GRAMPA. The row-to-peptide ratio is the
+- **Predictor corpus:** the MIC arm of `activity_harmonized.csv` — 39,117 rows
+  over **5,602 unique peptides** and 659 species, from GRAMPA. That table is
+  not redistributed here; see
+  [../data/processed/README.md](../data/processed/README.md) for the rebuild
+  command, the upstream sources with retrieval dates, the expected row counts
+  and a checksum of the table the shipped models were trained on. The
+  row-to-peptide ratio is the
   reason the split is clustered on sequence: one peptide assayed against many
   species must not straddle the boundary. HC50 rows (41,356: 39,448
   `hemopi2_predicted`, 1,908 `hemopi2_measured`) train the generator's
@@ -88,10 +101,12 @@ Sources, named in full:
   reference exclusion set in `data/antibacterial.fasta`, which aggregates
   DBAASP, dbAMP and APD.
 - **General small proteins** (`processed/negatives.fasta`) — 269,833 real
-  sequences with GenBank accessions, drawn from sORFdb/SmProt, length-filtered
-  to 8–50 residues; 269,824 survive deduplication into the pretrain table.
-  These are real translated open reading frames, **not** shuffled, random or
-  mutated decoys.
+  sequences with GenBank accessions, drawn from **sORFdb alone**,
+  length-filtered to 8–50 residues; 269,824 survive deduplication into the
+  pretrain table. These are real translated open reading frames, **not**
+  shuffled, random or mutated decoys. Earlier drafts of this document credited
+  this class to "sORFdb/SmProt"; see [SmProt v2 was obtained but never
+  used](#smprot-v2-was-obtained-but-never-used).
 - **GRAMPA** (`raw/grampa.csv`) — MIC measurements, filtered to entries
   without unusual chemical modifications, since the generator emits unmodified
   linear peptides.
@@ -113,6 +128,46 @@ distinguishing the two classes. This does not affect the shipped library's
 validity — stage 5b conditions on `is_amp` index 2 throughout and the
 compliance gate is independent of it — but the pretrain's validation curve
 should not be read as evidence about the general-peptide class.
+
+### SmProt v2 was obtained but never used
+
+Earlier revisions of this document, and the machine-readable source registry
+in `src/ampx/data/sources.py`, described the general small-protein class as
+drawn from "sORFdb/SmProt" and declared SmProt v2 as a pooled second source.
+**That was wrong. The class is sORFdb alone.** SmProt v2 was downloaded and
+staged, the source entry was written in anticipation of pooling, and the
+pooling step was never implemented. No SmProt sequence entered any corpus.
+
+The record is corrected here rather than quietly amended, because a training
+data disclosure that names a database the model never saw is a defect of the
+same kind as omitting one it did see.
+
+How it is known, from the build rather than from recollection:
+
+- `scripts/hpc/02_negatives.sbatch` in the research repository reads exactly
+  one raw input, `raw/sorfdb_proteins.fasta.gz`, and contains no pooling,
+  concatenation or second-input step.
+- The job log closes arithmetically with no room for a second database:
+  318,268 sORFdb records survive the 8–50 residue filter and deduplication,
+  48,435 are removed by the MMseqs2 screen against the reference
+  antibacterials, and 318,268 − 48,435 = **269,833**, which is exactly the
+  size of `processed/negatives.fasta`.
+- A search for "smprot" across the entire research repository returns nothing.
+  The identifier appears in one place in either repository: its own
+  declaration in `sources.py`.
+- The input file is the sORFdb Zenodo protein release (`sorfdb.faa.gz`), whose
+  records carry sORFdb's `>GenBank|<accession>|<protein_id>` headers. No
+  SmProt-style identifier occurs in it.
+
+The staged SmProt v2 download remains on the cluster and is untouched by any
+script in the pipeline. Its licence terms were never confirmed, so removing it
+from the disclosure also removes an unconfirmed-terms source from the
+submission rather than introducing one.
+
+This correction does not change the corpus, the checkpoints or any reported
+number. The 269,833 negatives and the 269,824 that survive deduplication into
+the pretrain table are the same sequences they always were; only their stated
+provenance changes.
 
 ### The generator was trained on the set it must stay novel against
 
@@ -212,11 +267,14 @@ The inference dependencies in `pyproject.toml` pin `torch`, `transformers` and
 is read rather than merely how fast it runs:
 
 - **`xgboost==3.2.0`** — the version recorded in `checkpoint/mic_regressor.json`'s
-  own `version` field. That model holds 1,807 trees with `best_iteration=1706`,
-  so 101 trees sit past the early-stopping point. Whether a reader truncates at
-  `best_iteration` or predicts with every tree has changed across XGBoost
-  releases, and the two answers give different MIC estimates and therefore a
-  different top 100.
+  own `version` field. That model holds 1,165 trees with `best_iteration=1064`,
+  so 100 trees sit past the early-stopping point. The raw `Booster.predict`
+  that inference uses defaults to predicting with **every** tree, including
+  those 100, which gives different MIC estimates and therefore a different top
+  100 from the truncated predictions the model was selected under. We pin the
+  version and name the tree count explicitly rather than relying on either
+  default. See [Tree count at prediction
+  time](#tree-count-at-prediction-time).
 - **`transformers==5.17.0`** — produced the 480-dimensional ESM-2 embedding
   block. The regressor's 510 input features are 9 descriptors, 16 species
   indicators, 5 Gram indicators and those 480 embedding dimensions, so a
@@ -597,21 +655,127 @@ excluded share is redistributed across the remaining grid.
 
 ## Filters applied to the library
 
-1. Alphabet restricted to the 20 standard residues; length 8-50.
-2. Deduplication.
-3. Exact-match exclusion against `data/antibacterial.fasta`.
-4. _(physicochemical windows, synthesizability, etc.)_
+Four filters run, in this order, after every sampling round
+(`generate_library` in `src/ampx/generate.py`). A sequence must clear all four
+to enter the library.
+
+1. **Compliance** (`compliance_report` in `src/ampx/models/compliance.py`):
+   alphabet restricted to the 20 standard residues; length 8-50; at most two
+   cysteines. The cysteine bound is a compliance requirement, not a
+   physicochemical preference — see [Cysteine content is a compliance
+   exclusion](#cysteine-content-is-a-compliance-exclusion).
+2. **Deduplication** within the library.
+3. **Exact-match exclusion** against `data/antibacterial.fasta`.
+4. **Novelty screen.** Levenshtein ratio against every one of the 39,448
+   reference sequences, computed exhaustively rather than against a shortlist.
+   The applied ceiling is `SAFETY_CEILING = 0.75`, below the 0.80 at which the
+   organizers' validator fails, so the shipped library holds margin against
+   the requirement rather than sitting on it.
+
+**No physicochemical windows and no synthesizability filter are applied.**
+Charge, hydrophobicity and hydrophobic moment enter the pipeline only as
+*conditioning* on the generator's sampling grid, never as a post-hoc screen on
+what it produced. Nothing is discarded for falling outside a property window.
+
+### The novelty ceiling was documented as 0.80 and is applied at 0.75
+
+An earlier revision of this document stated the applied novelty screen as
+"Levenshtein ratio ≤ 0.80", matching the threshold at which the organizers'
+validator fails. The shipped default is `SAFETY_CEILING = 0.75` in
+`src/ampx/compliance.py`, passed as the `--identity-ceiling` default.
+
+**0.75 is stricter than 0.80, so the discrepancy runs toward the conservative
+side.** Every sequence the shipped code admitted would also have passed under
+the documented number; the screen that actually ran rejected more than the
+prose claimed, not fewer. The error could only ever have understated how much
+margin the library holds against the compliance limit.
+
+**The 0.75 is a deliberate margin, not drift.** `src/ampx/compliance.py` keeps
+the two thresholds as separate named constants — `IDENTITY_CEILING = 0.80`,
+annotated as "the validator's literal rule", and `SAFETY_CEILING = 0.75`, "what
+you should actually select against" — with the reasoning recorded beside them:
+a candidate at exactly 0.800 passes only because the validator's comparison is
+strict, and the real Phase 1 screen is MMseqs2 alignment identity against
+MarLys, a different metric over a larger database that will not agree with
+Levenshtein in the third decimal place. Headroom costs almost nothing when
+picking 100 from 50,000. `SAFETY_CEILING` entered in this repository's first
+commit (`a818a9d`, 2026-08-26) at 0.75 and has never been modified since, so
+there is no revision in which the code drifted away from a 0.80 default.
+
+The code was correct throughout and the submitted library was never affected —
+the realised maximum identity to any reference sequence is **0.7451**, which
+satisfies both numbers. Only the prose was wrong. It is corrected in the filter
+list above and in the selection section below. The 0.80 figure still appears
+where this
+document describes the *organizers'* threshold, which is the number they
+published; the distinction is now explicit at both sites.
+
+This is the same failure mode as [Tree count at prediction
+time](#tree-count-at-prediction-time): a constant restated in prose drifts from
+the constant the code reads, and nothing fails when it does.
 
 ## Top-100 selection procedure
 
 **Objective — predicted breadth across the competition strain panel.**
-Candidates are ranked by the strain-weighted fraction of the 20-strain panel
-(Appendix B) they are predicted to inhibit at or below 16 µM, which is the
-Overall Success Rate the competition scores, with mean predicted log₁₀ MIC as
-the tie-break. Ranking by potency against a single organism was rejected:
-four of the five award categories score success rate across strain panels, and
-25 of our hundred are drawn at random, so the list needs a floor rather than a
-peak.
+Candidates are ranked by the **strain-weighted mean predicted log₁₀ MIC**
+across the nine panel species the regressor covers (Appendix B), each species
+weighted by the number of strains it contributes to the 20-strain panel.
+Ranking by potency against a single organism was rejected: four of the five
+award categories score success rate across strain panels, and 25 of our
+hundred are drawn at random, so the list needs a floor rather than a peak. A
+strain-weighted mean over nine species is a breadth key in exactly that
+sense — a candidate potent against one organism and inert against the rest
+cannot rank highly under it.
+
+The thresholded form of breadth — the strain-weighted fraction of the panel
+predicted at or below 16 µM, which is the Overall Success Rate the
+competition scores — is **not** the key. It is computed for every candidate
+and reported as a diagnostic, but it saturates at 1.00 among the top-ranked
+contenders, and a quantity that is constant across everything competing for
+the hundred places cannot order them. The continuous key retains its variance
+where the thresholded one has none. This is recorded in full under
+[The oracle is not extrapolating, and the ranking key reflects
+that](#the-oracle-is-not-extrapolating-and-the-ranking-key-reflects-that),
+which is the anchor for this decision; the saturating fraction is printed at
+generation time so the collapse stays visible rather than implicit.
+
+### Unresolved: the draw may be from the top 50, not the top 100
+
+The reasoning above, and the module docstring of `src/ampx/ranking.py`, assume
+the 25 tested peptides are drawn uniformly from all 100. Under that reading the
+expected team score is the mean over the whole list, rank order inside it is
+documentation rather than scoring, and the right objective is to raise the
+floor rather than the peak. **Two organizer sources disagree on this point and
+we do not know which supersedes.** The competition document states that "from
+each qualifying team's top-100 list, 25 peptides are drawn uniformly at
+random"; the website FAQ states that "a random subset of 25 peptides is drawn
+from the **top 50** of this list". If the FAQ is authoritative, ranks 1–50 are
+the scored set, ranks 51–100 are unscored, and intra-list ordering becomes a
+real design variable rather than a presentational one.
+
+We have **not** changed the selection rule on the strength of a React component
+in the challenge website's source, and we flag the ambiguity rather than
+silently picking the reading that flatters our design. The question is filed
+with the organizers on the challenge issue tracker.
+
+The submitted artifact appears unaffected either way. Selection is a greedy
+score-first walk, so the better half already sorts to the front — the top 50
+average **+0.1039** predicted log₁₀ MIC against **+0.2227** for ranks 51–100
+(lower is more potent) — and the long-band cap is enforced as a running share
+at every prefix, so it binds at k=50 (10 long-band members) exactly as it does
+at k=100 (19). A list built for the top-100 reading is therefore also a
+defensible list under the top-50 reading. What would change is this document's
+stated rationale, not the hundred sequences.
+
+In the code this is a single expression — `src/ampx/generate.py`:
+
+```python
+score = -metrics["mean_log_mic"] - np.where(eligible, 0.0, 10.0)
+```
+
+`mean_log_mic` is the only term that orders eligible candidates; the success
+rate never enters `score`. The `10.0` is the eligibility floor below, applied
+as a demotion rather than a deletion.
 
 The panel is collapsed onto the species the MIC regressor covers, weighted by
 strain count, summing to the full 20:
@@ -667,9 +831,63 @@ without changing the selection code.
 **Diversity constraint.** At most 4 candidates per structural cluster, where
 clusters are currently a coarse length-band × charge-band bucket.
 
-**Novelty screen.** Levenshtein ratio ≤ 0.80 against every one of the 39,448
+**Length: a cap on the long bands, and nothing else.** The oracle scores
+longer peptides as more potent — length and a normalised length are 2 of its
+9 physicochemical descriptors, and 40% of its MIC training rows are amidated
+peptides — so a greedy walk down the ranking drifts long. The selection
+therefore caps the two longest length bands (38–43, and 44–50 — the top band
+is open-ended rather than 6 residues wide) at a
+combined 20% of the list, enforced as a running share at every prefix rather
+than as a total, so the bound holds at k=100 and at every k within the
+overflow rather than being exhausted early by the highest-ranked candidates.
+
+No other length constraint is applied. In particular the short bands are
+given **no floor**: they are not capped, but neither are they granted quota
+slots they did not earn on predicted MIC. Admitting a candidate *because* it
+is short would import length into the selection rule to compensate for the
+oracle having imported length into its scoring, which is the same error in
+the opposite direction. Proportional stratification across all seven bands
+was implemented and rejected for exactly this reason — it forces slots into
+the 8–13 band where only 10.9% of the library clears the eligibility floor,
+buying a distributional match by promoting candidates the oracle rates
+poorly in the band where it is least reliable. One constraint, in one
+direction.
+
+The cap is fixed in code, not by invocation: `LONG_BANDS = {5, 6}` and
+`LONG_SHARE = 0.20` are module constants in `src/ampx/ranking.py`, applied
+inside the one selection function the entry point calls. No command-line flag
+selects a different algorithm, so no invocation produces a selection rule
+other than this one.
+
+#### The submitted list is produced by the entry point, not curated
+
+`generate/top.fasta` is whatever `uv run generate` writes. It is not, and
+cannot be, a list chosen by hand and committed: the organizers' validator
+clones the repository, runs the entry point, and compares the regenerated
+output against a second run, so any file placed in `generate/` is overwritten
+by their first command. A selection rule that lived in an analysis script
+rather than in `ampx` would therefore be discarded at validation while still
+appearing correct in the repository, and every downstream check would pass on
+the wrong list.
+
+Every constraint described in this section consequently lives in
+`ampx.ranking.select_top_diverse`, on the entry-point path.
+`scripts/stratified_reselect.py` re-selects over an already-generated library
+so the choice can be examined without an hour-long GPU run, but it imports
+that same function rather than reimplementing it; it produces byte-identical
+output, which is checked by hash. There is one selection implementation and no
+mechanism by which the shipped list and the analysed list can diverge.
+
+This is a reproducibility property worth stating plainly: the top 100 cannot
+be curated after the fact, and nothing in this submission's ranking is applied
+outside the code the organizers run themselves.
+
+**Novelty screen.** Levenshtein ratio ≤ 0.75 against every one of the 39,448
 reference sequences, computed exhaustively rather than against a shortlist,
-since a single sequence above the ceiling invalidates the list.
+since a single sequence above the ceiling invalidates the list. The organizers'
+threshold is 0.80; the applied ceiling is `SAFETY_CEILING = 0.75`
+(`src/ampx/compliance.py`), chosen to leave margin. The realised maximum over
+the submitted library is 0.7451.
 
 **How far to trust the ranking.** The oracle's held-out Spearman is 0.533 on a
 cluster-disjoint split, with a mean absolute error of 0.509 log₁₀ units — a
@@ -678,10 +896,173 @@ a coarse enrichment filter and a breadth estimator, not as a fine-grained
 ordering of the top 100, and nothing in the procedure depends on the exact
 order near the top.
 
+### The top 100 is skewed long, and the cap did not fix it
+
+The submitted list does not match the reference length distribution, and this
+section states how far off it is rather than presenting the capped list as a
+corrected one. **The cap bounded the tail; the skew remains.**
+
+The library itself is not the problem. Its length distribution tracks the
+reference closely (KS 0.0792 against `data/antibacterial.fasta`). The skew is
+introduced entirely by selection.
+
+| | median | >40 residues | length KS vs reference |
+|---|---:|---:|---:|
+| reference (`data/antibacterial.fasta`, n=39,448) | 18 | 3.5% | — |
+| generated library (n=50,000) | 19 | 4.6% | 0.0792 |
+| top 100, before the cap | 42.5 | 58% | **0.7846** |
+| top 100, as submitted (capped) | 33 | 14% | **0.6308** |
+
+The cap removed most of the tail — 58% of the list above 40 residues fell to
+14% — and improved KS by about a fifth, from 0.785 to 0.631. It did not bring
+the list near the reference, and it was never going to. **No candidate of 8–19
+residues survived the selection, in either band, out of 5,533 that cleared the
+eligibility floor.**
+
+#### Why: the oracle's eligibility is length-dependent
+
+The Gram-class eligibility floor passes a strongly length-dependent fraction
+of the library, measured on the gated library itself:
+
+| Band | 8–13 | 14–19 | 20–25 | 26–31 | 32–37 | 38–43 | 44–50 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| library | 13,618 | 11,681 | 14,679 | 3,804 | 3,092 | 1,497 | 1,629 |
+| eligible | 1,487 | 4,046 | 8,540 | 2,862 | 2,457 | 1,382 | 1,567 |
+| **eligible rate** | **10.9%** | 34.6% | 58.2% | 75.2% | 79.5% | 92.3% | **96.2%** |
+| selected (of 100) | **0** | **0** | 24 | 22 | 35 | 9 | 10 |
+
+Predicted potency is monotonic in length band. The most potent eligible
+candidate available in each band, in band order:
+
+| Band | 8–13 | 14–19 | 20–25 | 26–31 | 32–37 | 38–43 | 44–50 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| best predicted log₁₀ MIC | +0.479 | +0.273 | +0.090 | −0.005 | −0.284 | −0.526 | −0.748 |
+
+The rank correlation between band index and best achievable predicted potency
+is −1.00 across all seven bands. The consequence is decisive: the most potent
+short peptide in the entire library (+0.273) is less potent, by the oracle's
+own estimate, than the **worst** candidate admitted to the top 100 (+0.257).
+Zero of the 5,533 eligible short candidates beat anything on the list, so the
+number surviving a greedy walk is zero at any cap share on the long bands. The
+cap can only redistribute within 20–49 residues, and that is what it did.
+
+Two properties of the MIC regressor explain the gradient: length and a
+normalised length are 2 of its 9 physicochemical descriptors, and roughly 40%
+of its training rows are amidated peptides, which are systematically more
+potent than the unmodified analogues we generate (see
+[The MIC labels include modified
+peptides](#the-mic-labels-include-modified-peptides-our-designs-are-unmodified)).
+
+#### What the cap cost, and why that supports it
+
+Predicted potency of the selected 100, before and after the cap:
+
+| | mean | median | sd |
+|---|---:|---:|---:|
+| before the cap | −0.0177 | +0.0644 | 0.197 |
+| as submitted (capped) | +0.1633 | +0.1801 | 0.086 |
+| change | +0.181 | +0.116 | — |
+
+Positive is less potent. In concentration the mean moves from 0.96 µM to
+1.46 µM, a 52% increase, which sounds large until it is placed against the
+oracle's own accuracy: the shift is **0.36× the regressor's held-out mean
+absolute error of 0.509 log₁₀ units**. The entire predicted cost of discarding
+the long tail is well inside the noise floor of the model that predicted it.
+
+That is the argument for the cap. If bounding the long tail — 58% of the
+uncapped list sat above 40 residues, against 14% of the submitted one — cost
+real activity, it would show up as a shift large relative to the predictor's
+resolution; it does not. The length preference is better read
+as a scoring artifact of a model with length in its features and amidated
+peptides in its labels than as a genuine biological signal, so declining to
+follow it costs little that the model can actually resolve.
+
+#### A label defect in the band tables, caught and corrected
+
+The two band tables above were at one point headed `44–49` in their rightmost
+column. That label was wrong. `length_band()` clamps with
+`min((length - 8) // 6, N_BANDS - 1)`, so the top band is open-ended and holds
+everything from 44 residues to the 50-residue maximum, not a 6-residue window.
+323 library sequences and 2 of the submitted top 100 are 50 residues and sit in
+that band while falling outside its printed label.
+
+The counts were never affected: every figure in these tables was computed
+through `length_band()`, and they re-derive exactly from
+`generate/library.fasta` and `generate/top.fasta`. The cap is likewise applied
+on `length_band()` and always governed the true band, so the submitted list is
+unchanged. Only the printed label was wrong.
+
+The label came from `band_label()` in `scripts/stratified_reselect.py`, which
+computed its upper bound as `min(lo + BAND_WIDTH - 1, MAX_PEPTIDE_LENGTH)` —
+correct for bands 0–5 and off by one for the top band. It is corrected to
+return `MAX_PEPTIDE_LENGTH` for band `N_BANDS - 1`. The script had also
+restated `BAND_WIDTH` and `N_BANDS` locally instead of importing them from
+`ampx.ranking`, which is how the two definitions were able to drift apart at
+all; it now imports both. This is recorded rather than quietly fixed because
+the same class of defect appears twice elsewhere in this document, at [Tree
+count at prediction time](#tree-count-at-prediction-time) and at [The novelty
+ceiling was documented as 0.80](#the-novelty-ceiling-was-documented-as-080-and-is-applied-at-075).
+
+#### What we did not do
+
+We did not relax the eligibility floor for short peptides, and we did not
+allocate quota slots to the short bands. Both would have produced a list
+matching the reference distribution, and both would have done it by admitting
+candidates *because* they are short — importing length into the selection rule
+to offset the oracle having imported length into its scoring. The residual
+skew is reported here instead. It is a limitation of the ranking model, stated
+as one, and it is not corrected by the procedure that produced the submitted
+list.
+
+### The overflow list did not continue the top ranking
+
+We ship a ranked overflow list beyond the submitted 100 so the ranking can be
+extended without a second selection. That is only meaningful if the overflow
+continues the *same* ranking, and for a period it did not.
+
+The re-selection script called its allocation routine twice — once for k=100
+and once for k=500 — and treated the two results as one list and its
+extension. They were not. The passes allocated independently, so the first 100
+of the overflow were not the top 100. Measured on the affected artifacts:
+**only 40 of the top 100 appear in the overflow's first 100**, and 96 of the
+100 ranks hold a different sequence, the first disagreement at rank 5. The
+lists were not unrelated — 86 of the 100 appear somewhere in the overflow's
+500 — which is precisely why the defect was survivable: the overflow looked
+like a superset, and only its *order* was wrong. Nothing caught it, because
+each file was internally valid on its own — correct length, no duplicates,
+every member drawn from the library — and no check compared them to each
+other.
+
+The fix is by construction rather than by assertion. Selection now runs once,
+at the full overflow length, and the top list is the first `--k` entries of
+that single result, so the prefix property cannot be violated without the
+selector being wrong about its own output.
+
+The check that guards it deliberately lives in `scripts/verify_submission.py`
+and compares the two files on disk. An earlier attempt asserted the invariant
+inside the selection script, one line after assigning `top = ranked[:k]` —
+comparing a value against itself, so it passed unconditionally and would have
+gone on passing however the files were later written. An assertion that cannot
+fail is worse than none, because it reads like coverage.
+
 ## Manual interventions
 
-_(State plainly. "None" is a valid and strong answer -- the competition is
-partly about separating model quality from human curation.)_
+**None.**
+
+No sequence in either submitted file was hand-picked, hand-written, edited,
+added or removed. Both files are whatever `uv run generate` writes on a clean
+clone; the organizers' validator regenerates them from the entry point, and it
+reproduced our hashes byte-for-byte on a different machine.
+
+The selection rules themselves are human design decisions — the strain-weighted
+ranking objective, the ≤2-cysteine compliance bound, the novelty ceiling, and
+the cap on the two longest length bands described in [Length: a cap on the long
+bands](#length-a-cap-on-the-long-bands-and-nothing-else). All of them live in
+`src/ampx/ranking.py` and `src/ampx/generate.py`, on the path the organizers
+execute. None was applied to the artifact after the fact. We draw the line
+there deliberately: a rule that runs inside the entry point is part of the
+method and is reproducible from the seed alone, whereas a rule applied to the
+output afterwards would be curation and would not survive regeneration.
 
 ## Reproducibility
 
@@ -706,14 +1087,29 @@ file arrives as a small pointer that fails only later, deep inside a model
 load. The fetcher detects a pointer file explicitly and replaces it.
 
 `scripts/verify_submission.py` is the organizers' own validator from the
-template repository, with one addition: a step that constructs an `Oracle` and
-scores a sequence in the synced environment. Importing the package proves much
-less than it appears to, because it builds no model and reads no checkpoint —
-that gap is how a missing scikit-learn dependency survived an earlier import
-check. The file is otherwise unmodified, so its provenance is visible in a
-diff against the template.
-Verified on: _(OS, Python, GPU)_
+template repository, with two additions:
+
+1. **A step that constructs an `Oracle` and scores a sequence** in the synced
+   environment. Importing the package proves much less than it appears to,
+   because it builds no model and reads no checkpoint — that gap is how a
+   missing scikit-learn dependency survived an earlier import check.
+2. **A step that checks the overflow list against the top list**, requiring
+   `generate/top.fasta` to be the first 100 entries of the ranked overflow, in
+   order. This is a check between the two files as written, not inside the
+   selector, because an assertion inside the selector compares two slices of
+   one list and cannot fail. See
+   [The overflow list did not continue the top
+   ranking](#the-overflow-list-did-not-continue-the-top-ranking). The step is
+   skipped when no overflow file is present, since the entry point does not
+   produce one.
+
+The file is otherwise unmodified, so its provenance remains visible in a diff
+against the template.
+Verified on: Rocky Linux 9.8 (kernel 5.14.0-687.12.1.el9_8.x86_64), Python
+3.11, NVIDIA H100 80GB HBM3, CUDA. Cross-machine reproduction used two
+different nodes of the same cluster: the full-scale determinism gate on one,
+the organizers' validator on another, from a fresh clone with weights
+downloaded from the release.
 
 ## Use of AI assistants
-Claude was used for writing and editing content. 
-_(Required disclosure. State which tools were used and for what.)_
+Claude was used for writing and editing content.

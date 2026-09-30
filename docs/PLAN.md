@@ -107,7 +107,7 @@ Non-negotiable, from `verify_submission.py`:
 
 - 50,000 sequences exactly; alphabet `ACDEFGHIKLMNPQRSTVWY`; length 8–50; all
   unique; no exact match to any of the 39,448 sequences in
-  `data/reference/antibacterial.fasta`.
+  `data/antibacterial.fasta`.
 - **Top-100: no sequence may exceed 0.80 Levenshtein ratio to *any* reference.**
   This one fails teams. It is a scan against all 39k references, and a single
   violation invalidates the list. Note the real Phase 1 check uses **MMseqs2**
@@ -313,7 +313,7 @@ model if you want it as a descriptor — that is the right role for it.
 
 | Purpose | Source | License | Notes |
 |---|---|---|---|
-| Positives + exclusion | MarLys AMP (MLAMP), ~102k | CC0 | **The reference set.** `data/reference/antibacterial.fasta` is a 39,448-sequence subset with charge/disulfide/activity metadata in the headers — parse it, don't just read sequences. |
+| Positives + exclusion | MarLys AMP (MLAMP), ~102k | CC0 | **The reference set.** `data/antibacterial.fasta` is a 39,448-sequence subset with charge/disulfide/activity metadata in the headers — parse it, don't just read sequences. |
 | MIC labels | DBAASP v3 | CC BY 4.0 | Per-strain MIC. Filter to standard residues and free termini; standardise medium and CFU as OmegAMP does. |
 | Positives | APD6, dbAMP 3.0 | verify / academic | |
 | Diversity | AMPSphere | CC BY 4.0 | ~1M candidate AMPs from 60k+ metagenomes. This is your breadth. |

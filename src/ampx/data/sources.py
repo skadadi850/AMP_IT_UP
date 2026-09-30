@@ -236,7 +236,7 @@ SOURCES: list[Source] = [
         license="see Zenodo record; terms not confirmed",
         accessed="2026-08-30",
         url="https://doi.org/10.5281/zenodo.10688271",
-        notes="With SmProt v2, supplies the 269,824 general small proteins "
+        notes="The sole source of the 269,824 general small proteins "
               "that form the generator pretrain's negative class. Real "
               "translated open reading frames, NOT shuffled or mutated "
               "decoys. All five files MD5-verified against the Zenodo record; "
@@ -248,13 +248,20 @@ SOURCES: list[Source] = [
         id="smprot_v2",
         name="SmProt v2",
         kind="fasta",
-        role="general",
+        role="unused",
         license="terms not confirmed",
         accessed="2026-08-30",
         url="http://bigdata.ibp.ac.cn/SmProt/",
-        notes="Pooled with sORFdb into the pretrain general-peptide class. "
-              "832,959 FASTA records across evidence-specific files before "
-              "deduplication.",
+        notes="OBTAINED BUT NEVER USED. Downloaded and staged on 2026-08-30 "
+              "in anticipation of pooling it with sORFdb into the pretrain "
+              "general-peptide class; the pooling step was never implemented "
+              "and no SmProt sequence entered any corpus. The negatives build "
+              "(02_negatives.sbatch) reads sORFdb alone, and its record count "
+              "closes on sORFdb alone: 318,268 length-filtered minus 48,435 "
+              "AMP-like equals the 269,833 in negatives.fasta. Retained in "
+              "this registry so the disclosure records what was acquired, not "
+              "only what was used. See docs/METHOD.md, 'SmProt v2 was "
+              "obtained but never used'.",
     ),
 ]
 

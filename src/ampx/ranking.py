@@ -17,6 +17,19 @@ Two consequences that reshape the whole selection problem:
    90 mediocre ones scores the same as 100 mediocre ones. There is no upside to
    ranking *within* the list -- rank order is documentation, not scoring.
 
+   **Caveat, unresolved.** This rests on the competition document's wording,
+   quoted above. The challenge website's FAQ instead says the 25 are drawn
+   "from the top 50 of this list", under which ranks 1-50 are the scored set,
+   ranks 51-100 are unscored, and the sentence above is false. The two
+   organizer sources disagree and we do not know which supersedes; the
+   question is filed with the organizers and the selection rule is NOT
+   changed on the strength of the website source alone. The shipped list is
+   defensible under either reading -- the walk below is score-first, so the
+   better half sorts to the front (top 50 mean +0.1039 vs +0.2227 for ranks
+   51-100), and the long-band cap is a running share, so it binds at k=50 as
+   well as k=100. See "Unresolved: the draw may be from the top 50, not the
+   top 100" in docs/METHOD.md.
+
 2. **Downside risk is not diversified away.** With n=25 out of 100, the
    sampling variance of your score is substantial. MIC is censored at 64 uM,
    so one inactive peptide contributes a full 64 to the mean and cannot be
@@ -47,6 +60,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .compliance import SAFETY_CEILING, max_identity
+from .models.features import MIN_PEPTIDE_LENGTH
 
 
 @dataclass
@@ -147,6 +161,35 @@ INTERNAL_IDENTITY_LADDER = (0.60, 0.65, 0.70, 0.75)
 #: `score_candidates` encodes as a -10 penalty.
 ELIGIBLE_SCORE_FLOOR = -5.0
 
+#: Length banding for the long-band cap. Six-residue bands from the 8-residue
+#: floor, everything past 44 in the top band -- the same definition used by
+#: `_structural_cluster`'s length component in `generate.py`.
+BAND_WIDTH = 6
+N_BANDS = 7
+
+#: The two longest bands (38-43, and 44-50 -- the top band is open-ended,
+#: since length_band() clamps at N_BANDS-1), capped as a combined share of
+#: the list. See "Length: a cap on the long bands, and nothing else" in
+#: docs/METHOD.md.
+#:
+#: The oracle scores longer peptides as more potent -- length and a normalised
+#: length are 2 of its 9 descriptors, and ~40% of its MIC training rows are
+#: amidated peptides -- so an uncapped greedy walk drifts long. Without this
+#: the top 100 reached a median length of 42.5 residues against a reference
+#: median of 18, with 58% of the list above 40 residues.
+#:
+#: The short bands deliberately get no floor. They are not capped, but neither
+#: are they granted slots they did not earn on predicted MIC: admitting a
+#: candidate *because* it is short would import length into the selection rule
+#: to offset the oracle having imported length into its scoring.
+LONG_BANDS = frozenset({5, 6})
+LONG_SHARE = 0.20
+
+
+def length_band(length: int) -> int:
+    """Band index for a peptide length. Must match `stratified_reselect`."""
+    return min((length - MIN_PEPTIDE_LENGTH) // BAND_WIDTH, N_BANDS - 1)
+
 
 def select_top_diverse(
     candidates: list[Candidate],
@@ -158,7 +201,12 @@ def select_top_diverse(
     reference_ceiling: float = SAFETY_CEILING,
     ladder: tuple[float, ...] = INTERNAL_IDENTITY_LADDER,
 ) -> tuple[list[Candidate], dict]:
-    """Greedy selection: best score subject to a pairwise identity ceiling.
+    """Greedy selection: best score subject to identity and length ceilings.
+
+    Three constraints, all hard: the reference novelty ceiling, the pairwise
+    internal identity ceiling (with its relaxation ladder), and the long-band
+    cap of `LONG_SHARE` on `LONG_BANDS`. Nothing here gives the short bands a
+    floor -- see the `LONG_BANDS` comment for why that asymmetry is deliberate.
 
     Score-first, diversity-as-a-constraint. A weighted objective would need an
     exchange rate between success-rate points and identity points that cannot
@@ -193,6 +241,7 @@ def select_top_diverse(
     for ceiling in ladder:
         chosen: list[int] = []
         chosen_seqs: list[str] = []
+        n_long = 0
         for i in order:
             if len(chosen) >= k:
                 break
@@ -202,6 +251,14 @@ def select_top_diverse(
                     continue
             elif float(novelty.max_identity([cand.sequence])[0]) > reference_ceiling:
                 continue
+            # Long-band cap, enforced as a RUNNING share at every prefix
+            # rather than as a total. A total over k=500 would let the first
+            # 100 fill with long sequences and exhaust the allowance before
+            # rank 100; a running share holds the bound at every prefix,
+            # including at exactly 100, which is the list that ships.
+            is_long = length_band(len(cand.sequence)) in LONG_BANDS
+            if is_long and (n_long + 1) > LONG_SHARE * (len(chosen) + 1):
+                continue
             if chosen_seqs:
                 sims = process.cdist([cand.sequence], chosen_seqs,
                                      scorer=fuzz.ratio, workers=1)
@@ -209,15 +266,22 @@ def select_top_diverse(
                     continue
             chosen.append(i)
             chosen_seqs.append(cand.sequence)
+            n_long += int(is_long)
 
         eligible = sum(1 for i in chosen if candidates[i].mean_score > ELIGIBLE_SCORE_FLOOR)
         if eligible >= min_required:
             selected = [candidates[i] for i in chosen]
+            n_long_top = sum(
+                length_band(len(c.sequence)) in LONG_BANDS
+                for c in selected[:min_required]
+            )
             return selected, {
                 "internal_ceiling": ceiling,
                 "ladder_relaxed": ceiling != ladder[0],
                 "selected": len(selected),
                 "eligible": eligible,
+                "long_band": n_long,
+                "long_band_top": n_long_top,
                 "indices": chosen,
             }
 

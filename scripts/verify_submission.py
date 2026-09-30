@@ -14,6 +14,10 @@ MAX_LENGTH = 50
 ENTRY_POINT = "generate"
 
 TOP_SIZE = 100
+
+#: Ranked list beyond the submitted 100, relative to the repository root. Not
+#: produced by the `generate` entry point, so it may legitimately be absent.
+DEFAULT_OVERFLOW_FASTA = "docs/top500_overflow.fasta"
 LIBRARY_SIZE = 50_000
 
 
@@ -216,12 +220,66 @@ def _verify_top(top_fasta: Path, full_sequences: set[str], top_k: int) -> None:
         )
 
 
+def _verify_overflow_prefix(top_fasta: Path, overflow_fasta: Path, top_k: int) -> None:
+    """The top list must be the first `top_k` of the overflow list, in order.
+
+    The overflow exists so the organizers can extend past 100 without a second
+    ranking, which only holds if it continues the same one. An earlier version
+    of the re-selection ran the allocation twice, once for k=100 and once for
+    k=500, and the two passes disagreed: only 40 of the top 100 appeared in the
+    first 100 of the overflow. Nothing downstream noticed, because each file
+    was internally valid.
+
+    The check lives here, between the two files as they exist on disk, rather
+    than inside the selection script. There it would compare the selector's own
+    two slices of one list -- equal by construction, so the assertion could
+    never fail no matter how the files were later written.
+
+    A missing overflow file is not an error: it is not part of what the
+    organizers' entry point produces, so a repository without one is still a
+    valid submission. A present one that disagrees is a hard failure.
+    """
+    if not overflow_fasta.exists():
+        print(f"      no overflow list at {overflow_fasta}, skipping prefix check")
+        return
+
+    _, top_sequences = _read_fasta(top_fasta)
+    _, overflow_sequences = _read_fasta(overflow_fasta)
+
+    if len(overflow_sequences) < top_k:
+        raise ValueError(
+            f"Overflow check failed: {overflow_fasta} holds "
+            f"{len(overflow_sequences)} sequences, fewer than the {top_k} it "
+            "must contain as its prefix."
+        )
+
+    prefix = overflow_sequences[:top_k]
+    if top_sequences == prefix:
+        print(f"      top {top_k} is the prefix of {len(overflow_sequences)}, in order")
+        return
+
+    mismatches = [
+        i for i, (a, b) in enumerate(zip(top_sequences, prefix), start=1) if a != b
+    ]
+    shared = len(set(top_sequences) & set(prefix))
+    raise ValueError(
+        f"Overflow check failed: top.fasta is not the first {top_k} of "
+        f"{overflow_fasta.name}, in order.\n"
+        f"  - {len(mismatches)} of {top_k} positions differ "
+        f"(first at rank {mismatches[0] if mismatches else '?'})\n"
+        f"  - {shared} of {top_k} sequences are shared in any order\n"
+        "  The two lists were not produced by one ranking. Select once at the "
+        "overflow length and take the top list as its prefix."
+    )
+
+
 def verify_setup(
     dir: Path,
     url: str,
     branch: str | None = None,
     extras: list[str] | None = None,
     antibacterial_fasta: Path | None = None,
+    overflow_fasta: Path | None = None,
 ):
     extras = extras or []
 
@@ -247,6 +305,13 @@ def verify_setup(
 
     print("[6] Verifying top list")
     _verify_top(top_fasta, full_sequences, TOP_SIZE)
+
+    print("[6b] Verifying the overflow list continues the top ranking")
+    _verify_overflow_prefix(
+        top_fasta,
+        dir / (overflow_fasta or DEFAULT_OVERFLOW_FASTA),
+        TOP_SIZE,
+    )
 
     if antibacterial_fasta is not None:
         _, antibacterial_sequences = _read_fasta(antibacterial_fasta)
@@ -313,6 +378,15 @@ if __name__ == "__main__":
         default=Path("data/antibacterial.fasta"),
         help="FASTA file of known antibacterial sequences to check for overlap (default: data/antibacterial.fasta).",
     )
+    parser.add_argument(
+        "--overflow-fasta",
+        default=DEFAULT_OVERFLOW_FASTA,
+        help=(
+            "Ranked list beyond the top 100, relative to the cloned repository. "
+            "The top list must be its first 100 entries, in order. Skipped if "
+            f"absent (default: {DEFAULT_OVERFLOW_FASTA})."
+        ),
+    )
     args = parser.parse_args()
 
     try:
@@ -322,6 +396,7 @@ if __name__ == "__main__":
             branch=args.branch,
             extras=args.extras,
             antibacterial_fasta=args.antibacterial_fasta,
+            overflow_fasta=args.overflow_fasta,
         )
     except Exception as e:
         print(f"ERROR: {e}", file=sys.stderr)

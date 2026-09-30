@@ -13,5 +13,5 @@
 Usage:
 
 ```bash
-uv run python scripts/verify_submission.py https://github.com/<you>/<repo>
+uv run python scripts/verify_submission.py https://github.com/skadadi850/AMP_IT_UP
 ```

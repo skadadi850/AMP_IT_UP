@@ -96,14 +96,18 @@ class Oracle:
         self.model.load_model(model_path)
 
         # How many trees to predict with, fixed here instead of left to the
-        # library default. This checkpoint holds 1807 trees but was early-
-        # stopped at best_iteration=1706, so the 101 trees after that point are
-        # past the selection criterion. xgboost 3.2.0's default `predict`
-        # truncates at best_iteration + 1 = 1707 and that is the behaviour the
-        # recorded holdout Spearman was measured under, but the default has
-        # changed across releases. Naming the number makes the prediction a
-        # property of the checkpoint rather than of whichever xgboost is
-        # installed.
+        # library default. This checkpoint holds 1165 trees but was early-
+        # stopped at best_iteration=1064, so the 100 trees after that point are
+        # past the selection criterion.
+        #
+        # This matters because of the Booster above. XGBRegressor.predict, used
+        # during training, truncates at best_iteration + 1 = 1065, and that is
+        # the behaviour the recorded holdout Spearman was measured under. A raw
+        # Booster.predict defaults to using EVERY tree, so dropping the sklearn
+        # wrapper would silently have started scoring with all 1165 — a
+        # different top 100, with nothing in the output to say so. Naming the
+        # number makes the prediction a property of the checkpoint rather than
+        # of whichever xgboost is installed or which API happens to be calling.
         self.n_trees = int(
             self.meta.get("predict_n_trees")
             or (self.model.best_iteration + 1)

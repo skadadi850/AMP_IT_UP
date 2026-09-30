@@ -44,7 +44,7 @@ every `from .features import ...` relative import.
 | `src/GRAMP/encoder.py` | `src/ampx/models/encoder.py` |
 | `scripts/generate_masked.py` | `scripts/generate_masked.py` |
 | `scripts/train_mic_regressor.py` | `scripts/train_predictor.py` |
-| `results/comparison/variants/length_calibration_faceonly.json` | `checkpoints/length_calibration.json` |
+| `results/comparison/variants/length_calibration_faceonly.json` | `checkpoint/length_calibration.json` |
 
 `src/ampx/models/__init__.py` stays empty. Do not copy `src/GRAMP/__init__.py`;
 it imports `diffusion`/`decoder`/`data`/`ingest` and would pull the latent path
@@ -83,7 +83,7 @@ Delete `src/ampx/featurize.py` (one-line stub, superseded by
 
 ### Checkpoints
 
-These are on the cluster, not in either repo tree. Copy into `checkpoints/`:
+These are on the cluster, not in either repo tree. Copy into `checkpoint/`:
 
 - `masked_diffusion_best.pt` (the selectivity stage-5b fine-tune, not the
   `conditioned/` one)
@@ -135,7 +135,7 @@ Three replacements:
   and call `sample_library` from `scripts/generate_masked.py`.
 - `score_candidates` (the net-charge proxy) -> `Oracle.predict`.
 - The novelty screen inside `select_top` -> `ExhaustiveNovelty` against
-  `data/reference/antibacterial.fasta`.
+  `data/antibacterial.fasta`.
 
 The approximate `NoveltyFilter` top-400 shortlist is acceptable for filtering
 the 50,000-member library. It is not acceptable as the accept/reject gate on
@@ -203,7 +203,7 @@ high-charge mode scores badly on diversity even when every member is
 individually plausible. Do not make all 50,000 look like the top 100.
 
 1. Sample across the conditioning grid, not at a single optimum. Sweep length
-   bins against the calibrated distribution in `checkpoints/length_calibration.json`,
+   bins against the calibrated distribution in `checkpoint/length_calibration.json`,
    and sweep charge and hydrophobic moment across the range the training data
    covers.
 2. Apply the 80% novelty ceiling to the entire library, not only the top 100.
@@ -240,7 +240,7 @@ Re-run `verify_submission.py` on the final top 100.
    Match its paths exactly. Report any mismatch before changing ours.
 2. `LICENSE`: MIT, referenced in `README.md`.
 3. Weights ship as GitHub Release assets on a tag, not git-lfs. Commit
-   `checkpoints/SHA256SUMS`; `.gitignore` the `.pt` and regressor `.json`.
+   `checkpoint/SHA256SUMS`; `.gitignore` the `.pt` and regressor `.json`.
    `scripts/fetch_weights.py` downloads and verifies; `generate.py` calls it at
    the top of `main()` so a clean clone works with no manual step.
 4. Fix the stale layout lines: `README.md:55` still says
@@ -353,7 +353,7 @@ be a genuinely ordered list, not an unordered set of 100.
 On a clean clone, on a machine that is not the dev box:
 
 ```bash
-git clone <repo> fresh && cd fresh
+git clone https://github.com/skadadi850/AMP_IT_UP fresh && cd fresh
 uv sync
 uv run generate
 uv run python scripts/verify_submission.py

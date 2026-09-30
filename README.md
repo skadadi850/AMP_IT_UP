@@ -29,9 +29,12 @@ Both files are byte-identical across runs (fixed seed, default 42).
 | `--n-sequences` | `50000` | Library size |
 | `--top-k` | `100` | Ranked candidates |
 | `--seed` | `42` | Random seed |
-| `--kappa` | `1.5` | Risk aversion in top-K selection |
-| `--max-per-cluster` | `4` | Cap on candidates per structural cluster |
-| `--skip-verify` | off | Skip similarity scan (development only) |
+| `--length` | `50` | Maximum peptide length in residues. Template flag; the competition ceiling and the default are both 50 |
+| `--device` | auto | `cuda`, `cpu`, or omitted to resolve automatically |
+| `--identity-ceiling` | `0.75` | Maximum Levenshtein ratio to any reference sequence. The organizers' validator fails above `0.80`; the default leaves margin |
+| `--overflow-k` | `500` | Length of the ranked overflow list written to `docs/`. The organizers replace an invalid top-100 entry with the next valid candidate, so the ordering past 100 is used |
+| `--out` | entry-point name | Output directory |
+| `--kappa` | `1.5` | **Inert.** Risk aversion in the LCB ranking. The oracle is a single model, so `score_std` is 0 and `lcb` collapses to the mean; changing this flag does not change the output |
 
 ## Validating before you submit
 
@@ -40,7 +43,7 @@ Both files are byte-identical across runs (fixed seed, default 42).
 uv run generate
 
 # Full organizer validation against your pushed repo
-uv run python scripts/verify_submission.py https://github.com/<you>/<repo>
+uv run python scripts/verify_submission.py https://github.com/skadadi850/AMP_IT_UP
 ```
 
 ## Layout

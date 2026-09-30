@@ -5,7 +5,7 @@ description = "AMP Challenge 2027 submission: generative design of antimicrobial
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "YOUR NAME", email = "you@your-institution.edu" }]
+authors = [{ name = "Simran Kadadi", email = "skadadi@purdue.edu" }]
 
 # Everything the `generate` entry point touches at inference time. The
 # organizers run a bare `uv sync`, so anything omitted here is simply absent
@@ -14,10 +14,13 @@ authors = [{ name = "YOUR NAME", email = "you@your-institution.edu" }]
 # torch, transformers and xgboost are pinned exactly rather than floored,
 # because each one decides how a shipped checkpoint is interpreted:
 #   * xgboost 3.2.0 is the version that wrote checkpoint/mic_regressor.json
-#     (recorded in its own `version` field). That model carries 1807 trees
-#     with best_iteration=1706, so 101 trees sit past the early-stopping
-#     point and whether a reader truncates there or predicts with all of
-#     them changes every MIC estimate, and with it the top 100.
+#     (recorded in its own `version` field). That model carries 1165 trees
+#     with best_iteration=1064, so 100 trees sit past the early-stopping
+#     point. Inference predicts through a raw Booster, whose `predict`
+#     defaults to using every tree rather than truncating at best_iteration,
+#     so those 100 would change every MIC estimate and with it the top 100.
+#     Oracle passes an explicit iteration_range=(0, 1065) to avoid depending
+#     on that default; the pin keeps the surrounding behaviour fixed too.
 #   * transformers 5.17.0 produced the 480-d ESM-2 embedding block that the
 #     regressor's 510 input features are built on.
 #   * torch 2.11.0 trained checkpoint/masked_diffusion_best.pt.
