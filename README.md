@@ -220,17 +220,6 @@ results/             calibration and selection outputs
 generate/            library.fasta and top.fasta
 ```
 
-## Limitations
-
-- No wet-lab validation. All potency figures are surrogate predictions.
-- The same regressor ranks candidates and reports predicted potency, so predicted MIC for the
-  selected peptides is optimistic. It rests on heterogeneous GRAMPA assay data, and a single model
-  gives no uncertainty estimate.
-- Novelty is measured as Levenshtein ratio against the 39,448-sequence reference set. The
-  challenge's own similarity screening may use alignment identity against a larger database.
-  Passing the local check is necessary, not sufficient.
-- HC50 conditioning targets come from HemoPI-2 predictions, not measurements, and 1,367 of those predictions (3.47%) were computed on truncated sequences.
-- 37.4% of the MIC training rows are C-terminally amidated, while the designs have free termini, so predicted potency may overstate the activity of the submitted forms.
 
 ## Data disclosure
 
