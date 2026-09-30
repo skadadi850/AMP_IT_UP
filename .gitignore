@@ -29,3 +29,5 @@ run_b/
 # with retrieval dates, the expected row counts and a checksum of the table the
 # shipped models were trained on.
 data/processed/activity_harmonized.csv
+
+submission/
